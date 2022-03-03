@@ -348,6 +348,7 @@ override lib_find_packages_for = $(basename $(notdir $(wildcard $(foreach x,$1,$
 # Determine cflags for a list of libraries `$1`.
 # We just run pkg-config on all packages of those libraries.
 override lib_cflags = $(strip\
+	$(if $(filter-out $(all_libs),$1),$(error Unknown libraries: $(filter-out $(all_libs),$1)))\
 	$(call, Raw flags will be written here.)\
 	$(call var,__raw_flags :=)\
 	$(call, Pkg-config packages will be written here.)\
@@ -373,6 +374,7 @@ override lib_file_patterns := lib%.so lib%.a
 # Determine ldflags for a list of libraries `$1`.
 # We try to run pkg-config for each library if available, falling back to manually finding the libraries and linking them.
 override lib_ldflags = $(strip\
+	$(if $(filter-out $(all_libs),$1),$(error Unknown libraries: $(filter-out $(all_libs),$1)))\
 	$(call, Raw flags will be written here.)\
 	$(call var,__raw_flags :=)\
 	$(call, Pkg-config packages will be written here.)\
