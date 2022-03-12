@@ -31,7 +31,7 @@ endef
 override space := $(call) $(call)
 
 # The directory with the makefile.
-override proj_dir := $(dir $(firstword $(MAKEFILE_LIST)))
+override proj_dir := $(patsubst ./,.,$(dir $(firstword $(MAKEFILE_LIST))))
 
 # A string of all single-letter Make flags, without spaces.
 override single_letter_makeflags = $(filter-out -%,$(firstword $(MAKEFLAGS)))
@@ -70,17 +70,29 @@ override most_nested_low = $(if $(filter 1,$(words $2)),$(call most_nested,$2),$
 # `most_nested` ignores those filenames.
 override most_nested_ignored_files = pax_global_header
 
+# A recursive wildcard function.
+# Source: https://stackoverflow.com/a/18258352/2752075
+# Recursively searches a directory for all files matching a pattern.
+# The first parameter is a directory, the second is a pattern.
+# Example usage: SOURCES = $(call rwildcard, src, *.c *.cpp)
+# This implementation differs from the original. It was changed to correctly handle directory names without trailing `/`, and several directories at once.
+override rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(filter $(subst *,%,$2),$d))
+
+# Writes $1 to the output, immediately. Similar to $(info), but not delayed until the end of the recipe, when output grouping is used.
+override log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOUT),$1),$(info $1))
+
 
 # --- Archive support ---
 
 # We need it so early, because `archive_basename` is needed in the config files, and it needs to see all the archive types.
+# Also because it allows the configs to modify those settings.
 
 # Given archive filename $1, tries to determine the archive type. Returns one of `archive_types`, or empty on failure.
 override archive_classify_filename = $(firstword $(foreach x,$(archive_types),$(if $(call archive_is-$x,$1),$x)))
 
 # Given archive filename $1, returns the filename without the extension. Can work with lists.
 # Essentially this removes extensions one by one, until it stops looking like an archive.
-override archive_basename = $(foreach x,$1,$(if $(call archive_classify_filename,$1),$(call archive_basename,$(basename $1)),$1))
+override archive_basename = $(foreach x,$1,$(if $(call archive_classify_filename,$x),$(call archive_basename,$(basename $x)),$x))
 
 archive_types :=
 
@@ -98,12 +110,47 @@ override archive_is-ZIP = $(filter %.zip,$1)
 override archive_extract-ZIP = $(call safe_shell_exec,unzip $(call quote,$1) -d $(call quote,$2))
 
 
+# --- Language definitions ---
+
+language_list :=
+
+# Given filename $1, tries to guess the language. Causes an error on failure.
+override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x))))
+override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess language from filename: $1))
+
+# Everything should be mostly self-explanatory.
+# `language_outputs_deps` describes whether an extra `.d` file is created or not (don't define it if not).
+# In `language_command`:
+# $1 is the input file.
+# $2 is the output file.
+# $3 is the project name.
+
+language_list += c
+override language_name-c := C
+override language_pattern-c := *.c
+override language_command-c = $(CC) -MMD -MP -c $1 -o $2 $(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3)) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3)
+override language_outputs_deps-c = y
+
+language_list += cpp
+override language_name-cpp := C++
+override language_pattern-cpp := *.cpp
+override language_command-cpp = $(CXX) -MMD -MP -c $1 -o $2 $(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3)) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3)
+override language_outputs_deps-cpp = y
+
+language_list += rc
+override language_name-rc := Resource
+override language_pattern-rc := *.rc
+override language_command-rc = $(WINDRES) $(WINDRES_FLAGS) -i $1 -o $2
+
+
 # --- Define public config functions ---
 
 # Only the ones starting with uppercase letters are actually public.
 
+# List of library archives.
 override lib_ar_list :=
 # $1 is an archive name, or a space-separated list of them.
+# A list is not recommended, because LibrarySetting always applies only to the last library.
 override Library = $(call var,lib_ar_list += $1)
 
 override lib_setting_names := deps build_system cmake_flags configure_vars
@@ -114,22 +161,87 @@ override lib_setting_names := deps build_system cmake_flags configure_vars
 # * cmake_flags - if CMake is used, those are passed to it. Probably should be a list of `-D<var>=<value>`.
 # * configure_vars - if configure+make is used, this is prepended to `configure` and `make`. This should be a list of `<var>=<value>`, but you could use `/bin/env` there too.
 override LibrarySetting = \
-	$(if $(filter-out $(lib_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid library setting: $1))\
+	$(if $(filter-out $(lib_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid library setting `$1`, expected one of: $(lib_setting_names)))\
 	$(if $(filter 0,$(words $(lib_ar_list))),$(error Must specify library settings after a library))\
 	$(call var,__libsetting_$(strip $1)_$(call archive_basename,$(lastword $(lib_ar_list))) := $2)
+
+# List of projects.
+override proj_list :=
+# Allowed project types.
+override proj_kind_names := exe shared
+
+# $1 is the project kind, one of `proj_kind_names`.
+# $2 is the project name, or a space-separated list of them.
+# A list is not recommended, because ProjectSetting always applies only to the last library.
+override Project = \
+	$(if $(or $(filter-out $(proj_kind_names),$1),$(filter-out 1,$(words $1))),$(error Project kind must be one of: $(proj_kind_names)))\
+	$(call var,proj_list += $2)\
+	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
+
+override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func libs linker_var
+
+# On success, assigns $2 to variable `__projsetting_$1_<lib>`. Otherwise causes an error.
+# Settings are:
+# * kind - either `exe` or `shared`.
+# * sources - individual source files.
+# * source_dirs - directories to search for source files. The result is combined with `sources`.
+# * {c,cxx}flags - compiler flags for C and CXX respectively.
+# * ldflags - linker flags.
+# * common_flags - those are added to both `{c,cxx}flags` and `ldflags`.
+# * flags_func - a function name to determine extra per-file flags. The function is given the source filename as $1, and can return flags if it wants to.
+# * libs - a space-separated list of libraries created with $(Library), or `*` to use all libraries.
+# * linker_var - either CC or CXX. Defaults to CXX. Can also be any other variable.
+override ProjectSetting = \
+	$(if $(filter-out $(proj_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid project setting `$1`, expected one of: $(proj_setting_names)))\
+	$(if $(filter 0,$(words $(proj_list))),$(error Must specify project settings after a project))\
+	$(call var,__projsetting_$(strip $1)_$(lastword $(proj_list)) := $2)
 
 
 # --- Set default values before loading configs ---
 
+# Detect target OS.
+# Quasi-MSYS2 sets this variable...
+ifeq ($(TARGET_OS),)
+ifeq ($(OS),Windows_NT)
+TARGET_OS := windows
+else
+TARGET_OS := linux
+endif
+endif
+
+# Detect host OS.
+# I had two options: `uname` and `uname -o`. The first prints `Linux` and `$(MSYSTEM)-some-junk`, and the second prints `GNU/Linux` and `Msys` on Linux and MSYS2 respectively.
+# I don't want to parse MSYSTEM, so I decided to use `uname -o`.
+ifneq ($(findstring Msys,$(call safe_shell_exec,uname -o)),)
+HOST_OS := windows
+else
+HOST_OS := linux
+endif
+
+# Configure output extensions/prefixes.
+PREFIX_exe :=
+PREFIX_shared := lib
+ifeq ($(TARGET_OS),windows)
+EXT_exe := .exe
+EXT_shared := .dll
+else
+EXT_exe :=
+EXT_shared := .so
+endif
+
 # Traditional variables:
-export CC :=
-export CXX :=
-export CPP :=
-export LD :=
+export CC ?=
+export CXX ?=
+export CPP ?=
+export LD ?=
 export CFLAGS :=
 export CXXFLAGS :=
 export CPPFLAGS :=
 export LDFLAGS :=
+
+# Windres settings:
+WINDRES := windres
+WINDRES_FLAGS := -O res
 
 # Prevent pkg-config from finding external packages.
 override PKG_CONFIG_PATH :=
@@ -157,6 +269,10 @@ endif
 LIB_DIR := $(proj_dir)/built_libs
 # Library archives are found here.
 ARCHIVE_DIR := $(proj_dir)/libs
+# Object files are written here.
+OBJ_DIR := $(proj_dir)/obj
+# Binaries are written here.
+BIN_DIR := $(proj_dir)/bin
 
 
 # --- Load configs from current and parent directories ---
@@ -180,21 +296,15 @@ ifeq ($(findstring p,$(single_letter_makeflags)),)
 override find_versioned_tool = $(if $(findstring n,$(single_letter_makeflags)),$1,$(call find_versioned_tool_low,$1,$(lastword $(sort $(call safe_shell,bash -c 'compgen -c $1' | grep -Ex '$(subst +,\+,$1)(-[0-9]+)?')))))
 override find_versioned_tool_low = $(if $2,$2,$(error Can't find $1))
 
-override guessed_tools_list :=
 ifeq ($(CC),)
 override CC := $(call find_versioned_tool,clang)
-override guessed_tools_list += CC=$(CC)
 endif
 ifeq ($(CXX),)
 override CXX := $(call find_versioned_tool,clang++)
-override guessed_tools_list += CXX=$(CXX)
 endif
 ifeq ($(LINKER),)
 override LINKER := $(call find_versioned_tool,lld)
-override guessed_tools_list += LINKER=$(LINKER)
 endif
-
-$(if $(guessed_tools_list),$(info Guessed: $(guessed_tools_list)))
 endif
 
 
@@ -206,25 +316,37 @@ include $P
 # --- Finalize config ---
 
 # Note that we can't add the flags to CC, CXX.
-# It initially looks like we can, if we then do `-DCMAKE_C_COMPILER=$(subst $(space,;,$(CC))`,
-# but CMake seems to ignore those extra flags. What a shame.
-override CFLAGS += $(COMMON_FLAGS)
-override CFLAGS += $(COMMON_FLAGS_IMPLICIT)
-override CXXFLAGS += $(COMMON_FLAGS)
-override CXXFLAGS += $(COMMON_FLAGS_IMPLICIT)
-override LDFLAGS += $(COMMON_FLAGS)
-override LDFLAGS += $(COMMON_FLAGS_IMPLICIT)
+# It initially looked like we can, if we then do `-DCMAKE_C_COMPILER=$(subst $(space,;,$(CC))`, but CMake seems to ignore those extra flags. What a shame.
+# Note that we can't use `+=` here, because if user overrides those variables, they may not be `:=`, and we then undefine `COMMON_FLAGS`.
+override CFLAGS   := $(COMMON_FLAGS) $(CFLAGS)
+override CFLAGS   := $(COMMON_FLAGS_IMPLICIT) $(CFLAGS)
+override CXXFLAGS := $(COMMON_FLAGS) $(CXXFLAGS)
+override CXXFLAGS := $(COMMON_FLAGS_IMPLICIT) $(CXXFLAGS)
+override LDFLAGS  := $(COMMON_FLAGS) $(LDFLAGS)
+override LDFLAGS  := $(COMMON_FLAGS_IMPLICIT) $(LDFLAGS)
 override undefine COMMON_FLAGS
 override undefine COMMON_FLAGS_IMPLICIT
 
-override LDFLAGS += $(if $(LINKER),-fuse-ld=$(LINKER))
+override LDFLAGS := $(if $(LINKER),-fuse-ld=$(LINKER)) $(LDFLAGS)
 
-# The value of `$(MODE)`, if specified. Otherwise `generic`.
+ifeq ($(MODE),)
+MODE := generic
+endif
+
 # Use this string in paths to mode-specific files.
-override modestring := $(if $(MODE),$(MODE),generic)
+override os_mode_string := $(TARGET_OS)/$(MODE)
 
 # The list of library names.
-override all_libs = $(call archive_basename,$(lib_ar_list))
+override all_libs := $(call archive_basename,$(lib_ar_list))
+
+
+# --- Print header ---
+
+ifeq ($(TARGET_OS),$(HOST_OS))
+$(info [Env] $(TARGET_OS), $(MODE))
+else
+$(info [Env] $(HOST_OS)->$(TARGET_OS), $(MODE))
+endif
 
 
 # --- Generate library targets based on config ---
@@ -234,12 +356,9 @@ override all_libs = $(call archive_basename,$(lib_ar_list))
 override id_build_system = $(word 2,$(subst ->, ,$(firstword $(filter $(patsubst $1/%,%->%,$(wildcard $1/*)),$(buildsystem_detection)))))
 
 # Given library name $1, returns the log path for it. Can work with lists.
-override lib_name_to_log_path = $(patsubst %,$(LIB_DIR)/%/$(modestring)/log.txt,$1)
+override lib_name_to_log_path = $(patsubst %,$(LIB_DIR)/%/$(os_mode_string)/log.txt,$1)
 # Given library name $1, returns the installation prefix for it. Can work with lists.
-override lib_name_to_prefix = $(patsubst %,$(LIB_DIR)/%/$(modestring)/prefix,$1)
-
-# Writes $1 to the output, immediately. If you use $(info) instead, it will be delayed until the end of the recipe.
-override lib_log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOUT),$1),$(info $1))
+override lib_name_to_prefix = $(patsubst %,$(LIB_DIR)/%/$(os_mode_string)/prefix,$1)
 
 # Code for a library target.
 # $1 is an archive name.
@@ -260,15 +379,15 @@ $(__log_path_final): override __log_path := $(__log_path)
 # NOTE: If adding any useful variable here, document then in `Variables available to build systems` below.
 
 # Builds the library.
-.PHONY: $(__lib_name)
-$(__lib_name): $(__log_path_final)
+.PHONY: lib-$(__lib_name)
+lib-$(__lib_name): $(__log_path_final)
 
 # Cleans the library for this mode.
 # `safe_shell_exec` is used here and everywhere to make sure those targets can't run in parallel with building the libraries.
 .PHONY: clean-$(__lib_name)-this-mode
 clean-$(__lib_name)-this-mode: override __lib_name := $(__lib_name)
 clean-$(__lib_name)-this-mode:
-	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)/$(modestring)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)/$(os_mode_string)))
 	@true
 
 .PHONY: clean-$(__lib_name)-all
@@ -282,12 +401,12 @@ $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_dep
 	$(call, Firstly, detect archive type, and stop if unknown, to avoid creating junk.)
 	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))
 	$(if $(__ar_type),,$(error Don't know this archive extension))
-	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/$(modestring)/source)
+	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/source)
 	$(call, We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)
-	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/$(modestring)/temp_source)
-	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(modestring)/build)
+	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/temp_source)
+	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)
 	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))
-	$(call lib_log_now,[Library] $(__lib_name))
+	$(call log_now,[Library] $(__lib_name))
 	$(call, Remove old files.)
 	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))
 	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))
@@ -300,7 +419,7 @@ $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_dep
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))
 	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))
-	$(call lib_log_now,[Library] >>> Extracting $(__ar_type) archive...)
+	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)
 	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))
 	$(call, Move the most-nested source dir to the proper location, then remove the remaining junk.)
 	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))
@@ -315,7 +434,7 @@ $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_dep
 	$(buildsystem-$(__build_sys))
 	$(call, On success, move the log to the right location.)
 	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))
-	$(call lib_log_now,[Library] >>> Done)
+	$(call log_now,[Library] >>> Done)
 	@true
 endef
 
@@ -323,7 +442,7 @@ endef
 $(foreach x,$(lib_ar_list),$(call var,__ar_name := $x)$(eval $(value codesnippet_library)))
 
 .PHONY: libs
-libs: $(all_libs)
+libs: $(addprefix lib-,$(all_libs))
 
 # Destroy build/install results for all known libraries.
 .PHONY: clean-libs-known
@@ -337,13 +456,14 @@ clean-libs-all:
 	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)))
 	@true
 
+# Functions to get library flags:
 
 # Expands to `pkg-config` with the proper config variables.
 # Not a function.
-override lib_invoke_pkgconfig = PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=$(call quote,$(subst $(space),:,$(foreach x,$(all_libs),$(LIB_DIR)/$x/$(modestring)/prefix/lib/pkgconfig))) pkg-config --define-prefix
+override lib_invoke_pkgconfig = PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=$(call quote,$(subst $(space),:,$(foreach x,$(all_libs),$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib/pkgconfig))) pkg-config --define-prefix
 
 # Given list of library names `$1`, returns the pkg-config packages for them.
-override lib_find_packages_for = $(basename $(notdir $(wildcard $(foreach x,$1,$(LIB_DIR)/$x/$(modestring)/prefix/lib/pkgconfig/*.pc))))
+override lib_find_packages_for = $(basename $(notdir $(wildcard $(foreach x,$1,$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib/pkgconfig/*.pc))))
 
 # Determine cflags for a list of libraries `$1`.
 # We just run pkg-config on all packages of those libraries.
@@ -365,7 +485,7 @@ override lib_cflags_low = \
 		$(call var,__pkgs += $1)\
 	,\
 		$(call, Use a hardcoded search path.)\
-		$(call var,__raw_flags += -I$(LIB_DIR)/$x/$(modestring)/prefix/include)\
+		$(call var,__raw_flags += -I$(LIB_DIR)/$x/$(os_mode_string)/prefix/include)\
 	)
 
 # Library filename patterns, used by `lib_ldflags` below.
@@ -391,7 +511,7 @@ override lib_ldflags_low = \
 		$(call var,__pkgs += $1)\
 	,\
 		$(call, Dir for library search.)\
-		$(call var,__dir := $(LIB_DIR)/$x/$(modestring)/prefix/lib)\
+		$(call var,__dir := $(LIB_DIR)/$x/$(os_mode_string)/prefix/lib)\
 		$(call, Find library filenames.)\
 		$(call var,__libs := $(notdir $(wildcard $(subst %,*,$(addprefix $(__dir)/,$(lib_file_patterns))))))\
 		$(if $(__libs),\
@@ -406,6 +526,74 @@ override lib_ldflags_low = \
 # Calls $1($2) and maintains a global flag cache, to speed up repeated calls.
 override lib_cache_flags = $(if $(strip $2),$(call lib_cache_flags_low,$1,$2,__cached_$1_$(subst $(space),@,$(strip $2))))
 override lib_cache_flags_low = $(if $($3),,$(call var,$3 := $(call $1,$2)))$($(3))
+
+
+# --- Generate code build targets based on config ---
+
+# Find source files.
+override source_file_patterns := $(foreach x,$(language_list),$(language_pattern-$x))
+$(foreach x,$(proj_list),$(call var,__proj_allsources_$x := $(sort $(__projsetting_sources_$x) $(call rwildcard,$(__projsetting_source_dirs_$x),$(source_file_patterns)))))
+override all_source_files := $(sort $(foreach x,$(proj_list),$(__proj_allsources_$x)))
+
+# Given source filenames $1 and a project $2, returns the resulting dependency output files, if any. Some languages don't generate them.
+override source_files_to_dep_outputs = $(strip $(foreach x,$1,$(if $(language_outputs_deps-$(call guess_lang_from_filename,$x)),$(OBJ_DIR)/$(os_mode_string)/$2/$x.d)))
+
+# Given source filenames $1 and a project $2, returns the resulting primary output files. Never returns less elements than in $1.
+# and returns only the first output for each file.
+override source_files_to_main_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string)/$2/%.o,$1)
+
+# Given source filenames $1 and a project $2, returns all outputs for them. Might return more elements than in $1, but never less.
+# The first resulting element will always be the main output.
+override source_files_to_output_list = $(call source_files_to_main_outputs,$1,$2) $(call source_files_to_dep_outputs,$1,$2)
+
+
+# A list of targets that need directories to be created for them.
+override targets_needing_dirs :=
+# * The object files:
+override targets_needing_dirs += $(foreach x,$(proj_list),$(call source_files_to_output_list,$(__proj_allsources_$x),$x))
+# Generate the directory targets.
+$(foreach x,$(targets_needing_dirs),$(eval $x: | $(dir $x)))
+$(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call quote,$x)))
+
+# A template for object file targets.
+# Input variables:
+# `__src` - the source file.
+# `__proj` - the project name.
+override define codesnippet_object =
+# Output filenames.
+override __outputs := $(call source_files_to_output_list,$(__src),$(__proj))
+
+$(__outputs) &: override __outputs := $(__outputs)
+$(__outputs) &: override __proj := $(__proj)
+$(__outputs) &: override __lang := $(call guess_lang_from_filename,$(__src))
+
+$(__outputs): $(__src) $(call lib_name_to_log_path,$(all_libs))
+	$(call log_now,[$(__proj)] [$(language_name-$(__lang))] $<)
+	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj)) $(call $(__projsetting_flags_func_$(__proj)),$<)
+endef
+
+# Generate object file targets.
+$(foreach x,$(proj_list),$(call var,__proj := $x)$(foreach y,$(__proj_allsources_$x),$(call var,__src := $y)$(eval $(value codesnippet_object))))
+
+
+override proj_kind = $(foreach x,$1,$())
+
+override proj_output_filename = $(foreach )
+
+# A template for link targets.
+# The only input variable is `__proj`, the project name.
+override define codesnippet_link =
+
+override __filename :=  $(BIN_DIR)/$(os_mode_string)/$(PREFIX_$(__proj_kind_$(__proj)))$(__proj)$(EXT_$(__proj_kind_$(__proj)))
+
+$(__outputs) &: override __proj := $(__proj)
+
+$(__outputs): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)))
+	$(call log_now,[$(__proj)] [$(language_name-$(__lang))] $<)
+	$(call var,__link := $(__projsetting_linker_var_$(__proj)))
+	$(if $(__link),$(__link),$(CXX)) $(filter %.o,$^) $(LDFLAGS) $(__projsetting_ldflags_$(__proj))
+endef
+$(error finish the linking target)
 
 
 .DEFAULT_GOAL := foo
@@ -433,7 +621,7 @@ buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
 
 
 override buildsystem-cmake = \
-	$(call lib_log_now,[Library] >>> Configuring CMake...)\
+	$(call log_now,[Library] >>> Configuring CMake...)\
 	$(call safe_shell_exec,cmake\
 		-S $(call quote,$(__source_dir))\
 		-B $(call quote,$(__build_dir))\
@@ -455,9 +643,9 @@ override buildsystem-cmake = \
 		$(__libsetting_cmake_flags_$(__lib_name))\
 		>>$(call quote,$(__log_path))\
 	)\
-	$(call lib_log_now,[Library] >>> Building...)\
+	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,cmake --build $(call quote,$(__build_dir)) >>$(call quote,$(__log_path)) -j$(JOBS))\
-	$(call lib_log_now,[Library] >>> Installing...)\
+	$(call log_now,[Library] >>> Installing...)\
 	$(call safe_shell_exec,cmake --install $(call quote,$(__build_dir)) >>$(call quote,$(__log_path)))\
 
 override buildsystem-configure_make = \
@@ -465,13 +653,13 @@ override buildsystem-configure_make = \
 	$(call, Since we can't configure multiple search prefixes, like we do with CMAKE_SYSTEM_PREFIX_PATH,)\
 	$(call, we copy the prefixes of our dependencies to our own prefix.)\
 	$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),$(call safe_shell_exec,cp -rT $(call quote,$x) $(call quote,$(__install_dir))))\
-	$(call lib_log_now,[Library] >>> Running `./configure`...)\
+	$(call log_now,[Library] >>> Running `./configure`...)\
 	$(call, Note abspath on the prefix, I got an error explicitly requesting an absolute path. Tested on libvorbis.)\
 	$(call, Note the jank `cd`. It seems to allow out-of-tree builds.)\
 	$(call safe_shell_exec,(cd $(call quote,$(__build_dir)) && $(__bs_shell_vars) $(call quote,$(abspath $(__source_dir)/configure)) --prefix=$(call quote,$(abspath $(__install_dir)))) >>$(call quote,$(__log_path)))\
-	$(call lib_log_now,[Library] >>> Building...)\
+	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,$(__bs_shell_vars) make -C $(call quote,$(__build_dir)) -j$(JOBS) -Otarget >>$(call quote,$(__log_path)))\
-	$(call lib_log_now,[Library] >>> Installing...)\
+	$(call log_now,[Library] >>> Installing...)\
 	$(call, Note DESTDIR. We don't want to install to prefix yet, since we've copied our dependencies there.)\
 	$(call, Note abspath for DESTDIR. You get an error otherwise, explicitly asking for an absolute one. Tested on libvorbis.)\
 	$(call, Note redirecting stderr. Libtool warns when DESTDIR is non-empty, which is useless: "remember to run libtool --finish")\
