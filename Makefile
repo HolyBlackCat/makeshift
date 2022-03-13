@@ -84,15 +84,16 @@ override log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOU
 
 # --- Archive support ---
 
-# We need it so early, because `archive_basename` is needed in the config files, and it needs to see all the archive types.
+# We need it so early, because `archive_to_lib_name` is needed in the config files, and it needs to see all the archive types.
 # Also because it allows the configs to modify those settings.
 
 # Given archive filename $1, tries to determine the archive type. Returns one of `archive_types`, or empty on failure.
 override archive_classify_filename = $(firstword $(foreach x,$(archive_types),$(if $(call archive_is-$x,$1),$x)))
 
-# Given archive filename $1, returns the filename without the extension. Can work with lists.
-# Essentially this removes extensions one by one, until it stops looking like an archive.
-override archive_basename = $(foreach x,$1,$(if $(call archive_classify_filename,$x),$(call archive_basename,$(basename $x)),$x))
+# Given archive filenames $1, returns the library names for them.
+# Essentially returns filename without extensions, and without the `lib` prefix. Can work with lists.
+# It's recursive to be able to handle `.tar.gz`, and so on.
+override archive_to_lib_name = $(foreach x,$1,$(if $(call archive_classify_filename,$x),$(call archive_to_lib_name,$(basename $x)),$(patsubst lib%,%,$x)))
 
 archive_types :=
 
@@ -163,12 +164,14 @@ override lib_setting_names := deps build_system cmake_flags configure_vars
 override LibrarySetting = \
 	$(if $(filter-out $(lib_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid library setting `$1`, expected one of: $(lib_setting_names)))\
 	$(if $(filter 0,$(words $(lib_ar_list))),$(error Must specify library settings after a library))\
-	$(call var,__libsetting_$(strip $1)_$(call archive_basename,$(lastword $(lib_ar_list))) := $2)
+	$(call var,__libsetting_$(strip $1)_$(call archive_to_lib_name,$(lastword $(lib_ar_list))) := $2)
 
 # List of projects.
 override proj_list :=
 # Allowed project types.
 override proj_kind_names := exe shared
+override proj_kind_name-exe := Executable
+override proj_kind_name-shared := Shared library
 
 # $1 is the project kind, one of `proj_kind_names`.
 # $2 is the project name, or a space-separated list of them.
@@ -243,6 +246,13 @@ export LDFLAGS :=
 WINDRES := windres
 WINDRES_FLAGS := -O res
 
+# A variable that controls the library loading path.
+ifeq ($(TARGET_OS),windows)
+LIBRARY_PATH_VAR := PATH
+else
+LIBRARY_PATH_VAR := LD_LIBRARY_PATH
+endif
+
 # Prevent pkg-config from finding external packages.
 override PKG_CONFIG_PATH :=
 export PKG_CONFIG_PATH
@@ -309,7 +319,7 @@ endif
 
 
 # --- Load project file ---
-P := project.mk
+P := $(proj_dir)/project.mk
 include $P
 
 
@@ -337,7 +347,7 @@ endif
 override os_mode_string := $(TARGET_OS)/$(MODE)
 
 # The list of library names.
-override all_libs := $(call archive_basename,$(lib_ar_list))
+override all_libs := $(call archive_to_lib_name,$(lib_ar_list))
 
 
 # --- Print header ---
@@ -364,7 +374,7 @@ override lib_name_to_prefix = $(patsubst %,$(LIB_DIR)/%/$(os_mode_string)/prefix
 # $1 is an archive name.
 override define codesnippet_library =
 # __ar_name = Archive filename
-$(call var,__lib_name := $(call archive_basename,$(__ar_name)))# Library name
+$(call var,__lib_name := $(call archive_to_lib_name,$(__ar_name)))# Library name
 $(call var,__ar_path := $(ARCHIVE_DIR)/$(__ar_name))# Archive path
 $(call var,__log_path_final := $(call lib_name_to_log_path,$(__lib_name)))# The final log path
 $(call var,__log_path := $(__log_path_final).unfinished)# Temporary log path for an unfinished log
@@ -382,18 +392,26 @@ $(__log_path_final): override __log_path := $(__log_path)
 .PHONY: lib-$(__lib_name)
 lib-$(__lib_name): $(__log_path_final)
 
-# Cleans the library for this mode.
+# Cleans the library completely.
 # `safe_shell_exec` is used here and everywhere to make sure those targets can't run in parallel with building the libraries.
-.PHONY: clean-$(__lib_name)-this-mode
-clean-$(__lib_name)-this-mode: override __lib_name := $(__lib_name)
-clean-$(__lib_name)-this-mode:
-	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)/$(os_mode_string)))
+.PHONY: clean-lib-$(__lib_name)
+clean-lib-$(__lib_name): override __lib_name := $(__lib_name)
+clean-lib-$(__lib_name):
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)))
 	@true
 
-.PHONY: clean-$(__lib_name)-all
-clean-$(__lib_name)-all: override __lib_name := $(__lib_name)
-clean-$(__lib_name)-all:
-	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)))
+# Cleans the library completely for this OS.
+.PHONY: clean-lib-$(__lib_name)-this-os
+clean-lib-$(__lib_name)-this-os: override __lib_name := $(__lib_name)
+clean-lib-$(__lib_name)-this-os:
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)/$(TARGET_OS)))
+	@true
+
+# Cleans the library for this OS and mode.
+.PHONY: clean-lib-$(__lib_name)-this-os-this-mode
+clean-lib-$(__lib_name)-this-os-this-mode: override __lib_name := $(__lib_name)
+clean-lib-$(__lib_name)-this-os-this-mode:
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$(__lib_name)/$(os_mode_string)))
 	@true
 
 # Actually builds the library. Has a pretty alias, defined above.
@@ -444,16 +462,22 @@ $(foreach x,$(lib_ar_list),$(call var,__ar_name := $x)$(eval $(value codesnippet
 .PHONY: libs
 libs: $(addprefix lib-,$(all_libs))
 
-# Destroy build/install results for all known libraries.
-.PHONY: clean-libs-known
-clean-libs-known:
-	$(foreach x,$(all_libs),$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)/$x)))
+# Destroy build/install results for all libraries in the directory, even unknown ones.
+.PHONY: clean-libs
+clean-libs:
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)))
 	@true
 
-# Destroy build/install results for all libraries in the directory, even unknown ones.
-.PHONY: clean-libs-all
-clean-libs-all:
-	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)))
+# Destroy build/install results for all libraries in the directory, for this specific OS and mode.
+.PHONY: clean-libs-this-os
+clean-libs-this-os:
+	$(call safe_shell_exec,rm -rf $(filter $(LIB_DIR)/%,$(wildcard $(LIB_DIR)/*/$(TARGET_OS))))
+	@true
+
+# Destroy build/install results for all libraries in the directory, for this specific OS and mode.
+.PHONY: clean-libs-this-os-this-mode
+clean-libs-this-os-this-mode:
+	$(call safe_shell_exec,rm -rf $(filter $(LIB_DIR)/%,$(wildcard $(LIB_DIR)/*/$(os_mode_string))))
 	@true
 
 # Functions to get library flags:
@@ -546,14 +570,11 @@ override source_files_to_main_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string
 # The first resulting element will always be the main output.
 override source_files_to_output_list = $(call source_files_to_main_outputs,$1,$2) $(call source_files_to_dep_outputs,$1,$2)
 
+# Given a list of projects $1, returns the link results they produce.
+override proj_output_filename = $(foreach x,$1,$(BIN_DIR)/$(os_mode_string)/$(PREFIX_$(__proj_kind_$x))$x$(EXT_$(__proj_kind_$x)))
 
-# A list of targets that need directories to be created for them.
-override targets_needing_dirs :=
-# * The object files:
-override targets_needing_dirs += $(foreach x,$(proj_list),$(call source_files_to_output_list,$(__proj_allsources_$x),$x))
-# Generate the directory targets.
-$(foreach x,$(targets_needing_dirs),$(eval $x: | $(dir $x)))
-$(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call quote,$x)))
+# Given a project name $1, generates an assignment to an environment variable, configuring the
+override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(subst $(space),:,$(foreach x,$(__projsetting_libs_$1),$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib)))
 
 # A template for object file targets.
 # Input variables:
@@ -575,26 +596,86 @@ endef
 # Generate object file targets.
 $(foreach x,$(proj_list),$(call var,__proj := $x)$(foreach y,$(__proj_allsources_$x),$(call var,__src := $y)$(eval $(value codesnippet_object))))
 
-
-override proj_kind = $(foreach x,$1,$())
-
-override proj_output_filename = $(foreach )
-
 # A template for link targets.
 # The only input variable is `__proj`, the project name.
 override define codesnippet_link =
+# Link result.
+override __filename := $(call proj_output_filename,$(__proj))
 
-override __filename :=  $(BIN_DIR)/$(os_mode_string)/$(PREFIX_$(__proj_kind_$(__proj)))$(__proj)$(EXT_$(__proj_kind_$(__proj)))
+# A user-friendly link target.
+.PHONY: proj-$(__proj)
+proj-$(__proj): $(__filename)
 
-$(__outputs) &: override __proj := $(__proj)
-
-$(__outputs): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)))
-	$(call log_now,[$(__proj)] [$(language_name-$(__lang))] $<)
+# The actual link target.
+$(__filename): override __proj := $(__proj)
+$(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj))
+	$(call log_now,[$(__proj)] [$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
 	$(call var,__link := $(__projsetting_linker_var_$(__proj)))
-	$(if $(__link),$(__link),$(CXX)) $(filter %.o,$^) $(LDFLAGS) $(__projsetting_ldflags_$(__proj))
-endef
-$(error finish the linking target)
+	@$(if $(__link),$(__link),$(CXX)) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
+		$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj))) \
+		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj))
 
+ifeq ($(__proj_kind_$(__proj)),exe)
+# A target to run the project.
+.PHONY: run-$(__proj)
+run-$(__proj): override __filename := $(__filename)
+run-$(__proj): $(__filename)
+	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
+
+# A target to run the project without compiling it.
+.PHONY: run-old-$(__proj)
+run-old-$(__proj): override __filename := $(__filename)
+run-old-$(__proj):
+	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
+
+# Copies of the same targets to run the first projects.
+ifeq ($(__had_any_exe_proj),)
+override __had_any_exe_proj := 1
+.PHONY: run-default
+run-default: run-$(__proj)
+.PHONY: run-old-default
+run-old-default: run-$(__proj)
+endif
+endif
+
+# Target to clean the project.
+clean-this-os-this-mode-$(__proj): override __proj := $(__proj)
+clean-this-os-this-mode-$(__proj): override __filename := $(__filename)
+clean-this-os-this-mode-$(__proj):
+	$(call safe_shell_exec,rm -rf $(call quote,$(__filename)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(OBJ_DIR)/$(os_mode_string)/$(__proj)))
+	@true
+endef
+
+# Generate link targets.
+$(foreach x,$(proj_list),$(call var,__proj := $x)$(eval $(value codesnippet_link)))
+
+# A list of targets that need directories to be created for them.
+override targets_needing_dirs :=
+# * The object files:
+override targets_needing_dirs += $(foreach x,$(proj_list),$(call source_files_to_output_list,$(__proj_allsources_$x),$x))
+# * The link results:
+override targets_needing_dirs += $(foreach x,$(proj_list),$(call proj_output_filename,$x))
+# Generate the directory targets.
+$(foreach x,$(targets_needing_dirs),$(eval $x: | $(dir $x)))
+$(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call quote,$x)))
+
+# Cleaning targets. Those ignore libraries.
+
+.PHONY: clean
+clean:
+	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)) $(call quote,$(OBJ_DIR)))
+	@true
+
+.PHONY: clean-this-os
+clean-this-os:
+	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)/$(TARGET_OS)) $(call quote,$(OBJ_DIR)/$(TARGET_OS)))
+	@true
+
+.PHONY: clean-this-os-this-mode
+clean-this-os-this-mode:
+	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)/$(os_mode_string)) $(call quote,$(OBJ_DIR)/$(os_mode_string)))
+	@true
 
 .DEFAULT_GOAL := foo
 foo: libs
