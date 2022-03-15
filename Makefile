@@ -159,13 +159,15 @@ override lib_ar_list :=
 # A list is not recommended, because LibrarySetting always applies only to the last library.
 override Library = $(call var,lib_ar_list += $1)
 
-override lib_setting_names := deps build_system cmake_flags configure_vars
+override lib_setting_names := deps build_system cmake_flags configure_vars copy_files
 # On success, assigns $2 to variable `__libsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
 # * deps - library dependencies, that this library will be allowed to see when building. A space-separated list of library names (their archive names without extensions).
 # * build_system - override build system detection. Can be: `cmake`, `configure_make`, etc. See `id_build_system` below for the full list.
 # * cmake_flags - if CMake is used, those are passed to it. Probably should be a list of `-D<var>=<value>`.
 # * configure_vars - if configure+make is used, this is prepended to `configure` and `make`. This should be a list of `<var>=<value>`, but you could use `/bin/env` there too.
+# * copy_files - if `copy_files` build system is used, this must be specified to describe what files/dirs to copy.
+#                Must be a space-separated list of `src->dst`, where `src` is relative to source and `dst` is relative to the install prefix. Both can be files or directories.
 override LibrarySetting = \
 	$(if $(filter-out $(lib_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid library setting `$1`, expected one of: $(lib_setting_names)))\
 	$(if $(filter 0,$(words $(lib_ar_list))),$(error Must specify library settings after a library))\
@@ -741,6 +743,13 @@ foo: libs
 # A space separated list of `<filename>-><buildsystem>`.
 buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
 
+
+override buildsystem-copy_files = \
+	$(call log_now,[Library] >>> Copying files...)\
+	$(call, Make sure we know what files to copy.)\
+	$(if $(__libsetting_copy_files_$(__lib_name)),,$(error Must specify the `copy_files` setting for the `copy_files` build system))\
+	$(foreach x,$(__libsetting_copy_files_$(__lib_name)),$(call safe_shell_exec,cp -rT $(call quote,$(__source_dir)/$(word 1,$(subst ->, ,$x))) $(call quote,$(__install_dir)/$(word 2,$(subst ->, ,$x)))))\
+	$(file >$(__log_path),)
 
 override buildsystem-cmake = \
 	$(call log_now,[Library] >>> Configuring CMake...)\
