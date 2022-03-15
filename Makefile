@@ -125,18 +125,23 @@ override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess langu
 # $1 is the input file.
 # $2 is the output file.
 # $3 is the project name.
+# $4 is extra flags.
 
 language_list += c
 override language_name-c := C
 override language_pattern-c := *.c
-override language_command-c = $(CC) -MMD -MP -c $1 -o $2 $(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3)) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3)
-override language_outputs_deps-c = y
+override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(filter-out $(__projsetting_ignored_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_outputs_deps-c := y
+override language_link-c = $(CC)
+override language_pchflag-c := -xc-header
 
 language_list += cpp
 override language_name-cpp := C++
 override language_pattern-cpp := *.cpp
-override language_command-cpp = $(CXX) -MMD -MP -c $1 -o $2 $(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3)) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3)
-override language_outputs_deps-cpp = y
+override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(filter-out $(__projsetting_ignored_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_outputs_deps-cpp := y
+override language_link-cpp = $(CXX)
+override language_pchflag-cpp := -xc++-header
 
 language_list += rc
 override language_name-rc := Resource
@@ -181,7 +186,7 @@ override Project = \
 	$(call var,proj_list += $2)\
 	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
 
-override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func libs linker_var
+override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch libs ignored_lib_flags lang
 
 # On success, assigns $2 to variable `__projsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
@@ -192,8 +197,10 @@ override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags 
 # * ldflags - linker flags.
 # * common_flags - those are added to both `{c,cxx}flags` and `ldflags`.
 # * flags_func - a function name to determine extra per-file flags. The function is given the source filename as $1, and can return flags if it wants to.
+# * pch - the name of a precompiled header.
 # * libs - a space-separated list of libraries created with $(Library), or `*` to use all libraries.
-# * linker_var - either CC or CXX. Defaults to CXX. Can also be any other variable.
+# * ignored_lib_flags - those flags are removed from the library flags (both cflags and ldflags).
+# * lang - either `c` or `cpp`. Sets the language for linking and PCH.
 override ProjectSetting = \
 	$(if $(filter-out $(proj_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid project setting `$1`, expected one of: $(proj_setting_names)))\
 	$(if $(filter 0,$(words $(proj_list))),$(error Must specify project settings after a project))\
@@ -267,6 +274,7 @@ MODE :=# Build mode.
 CMAKE_GENERATOR :=# CMake generator, not quoted. Optional.
 COMMON_FLAGS :=# Used both when compiling and linking.
 LINKER :=# E.g. `lld` or `lld-13`. Can be empty to use the default one.
+ALLOW_PCH := 1# If 0 or empty, disable PCH.
 
 # Used both when compiling and linking. Those are set automatically.
 # Note `=` instead of `:=`, since LINKER is set later.
@@ -348,6 +356,9 @@ override os_mode_string := $(TARGET_OS)/$(MODE)
 
 # The list of library names.
 override all_libs := $(call archive_to_lib_name,$(lib_ar_list))
+
+# If `ALLOW_PCH` was 0, make it empty.
+override ALLOW_PCH := $(filter-out 0,$(ALLOW_PCH))
 
 
 # --- Print header ---
@@ -559,12 +570,18 @@ override source_file_patterns := $(foreach x,$(language_list),$(language_pattern
 $(foreach x,$(proj_list),$(call var,__proj_allsources_$x := $(sort $(__projsetting_sources_$x) $(call rwildcard,$(__projsetting_source_dirs_$x),$(source_file_patterns)))))
 override all_source_files := $(sort $(foreach x,$(proj_list),$(__proj_allsources_$x)))
 
+# Determine language for each project, if not specified.
+$(foreach x,$(proj_list),$(if $(__projsetting_lang_$x),,$(call var,__projsetting_lang_$x := cpp)))
+
 # Given source filenames $1 and a project $2, returns the resulting dependency output files, if any. Some languages don't generate them.
 override source_files_to_dep_outputs = $(strip $(foreach x,$1,$(if $(language_outputs_deps-$(call guess_lang_from_filename,$x)),$(OBJ_DIR)/$(os_mode_string)/$2/$x.d)))
 
 # Given source filenames $1 and a project $2, returns the resulting primary output files. Never returns less elements than in $1.
 # and returns only the first output for each file.
 override source_files_to_main_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string)/$2/%.o,$1)
+
+# Given source PCH filenames $1 and a project $2, returns the compiled PCH filename.
+override pch_files_to_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string)/$2/%.gch,$1)
 
 # Given source filenames $1 and a project $2, returns all outputs for them. Might return more elements than in $1, but never less.
 # The first resulting element will always be the main output.
@@ -576,6 +593,25 @@ override proj_output_filename = $(foreach x,$1,$(BIN_DIR)/$(os_mode_string)/$(PR
 # Given a project name $1, generates an assignment to an environment variable, configuring the
 override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(subst $(space),:,$(foreach x,$(__projsetting_libs_$1),$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib)))
 
+# A template for PCH targets.
+# The only input variable is `__proj`, the project name.
+override define codesnippet_pch =
+# Source filename.
+override __src := $(__projsetting_pch_$(__proj))
+# Output filename.
+override __output := $(call pch_files_to_outputs,$(__src),$(__proj))
+
+$(__output): override __output := $(__output)
+$(__output): override __proj := $(__proj)
+
+$(__output): $(__src) $(call lib_name_to_log_path,$(all_libs))
+	$(call log_now,[$(__proj)] [$(language_name-$(__lang)) PCH] $<)
+	@$(call language_command-$(__lang),$<,$@,$(__proj),$(language_pchflag-$(__projsetting_lang_$(__proj))))
+endef
+
+# Generate PCH targets.
+$(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call var,__proj := $x)$(eval $(value codesnippet_pch))))
+
 # A template for object file targets.
 # Input variables:
 # `__src` - the source file.
@@ -583,14 +619,20 @@ override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(subst $(s
 override define codesnippet_object =
 # Output filenames.
 override __outputs := $(call source_files_to_output_list,$(__src),$(__proj))
+# The source PCH, if any.
+override __pch_src := $(__projsetting_pch_$(__proj))
+# The compiled PCH, if any.
+override __pch := $(call pch_files_to_outputs,$(__pch_src),$(__proj))
 
 $(__outputs) &: override __outputs := $(__outputs)
 $(__outputs) &: override __proj := $(__proj)
 $(__outputs) &: override __lang := $(call guess_lang_from_filename,$(__src))
+$(__outputs) &: override __pch_src := $(__pch_src)
+$(__outputs) &: override __pch := $(__pch)
 
-$(__outputs): $(__src) $(call lib_name_to_log_path,$(all_libs))
+$(__outputs): $(__src) $(if $(ALLOW_PCH),$(__pch)) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(__proj)] [$(language_name-$(__lang))] $<)
-	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj)) $(call $(__projsetting_flags_func_$(__proj)),$<)
+	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj),$(if $(__pch),-include$(if $(ALLOW_PCH),$(patsubst %.gch,%,$(__pch)),$(__pch_src))))
 endef
 
 # Generate object file targets.
@@ -610,9 +652,8 @@ proj-$(__proj): $(__filename)
 $(__filename): override __proj := $(__proj)
 $(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj))
 	$(call log_now,[$(__proj)] [$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
-	$(call var,__link := $(__projsetting_linker_var_$(__proj)))
-	@$(if $(__link),$(__link),$(CXX)) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
-		$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj))) \
+	@$(language_link-$(__projsetting_lang_$(__proj))) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
+		$(filter-out $(__projsetting_ignored_lib_flags_$(__proj)),$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj)))) \
 		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj))
 
 ifeq ($(__proj_kind_$(__proj)),exe)
