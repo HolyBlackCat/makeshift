@@ -81,6 +81,12 @@ override rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(
 # Writes $1 to the output, immediately. Similar to $(info), but not delayed until the end of the recipe, when output grouping is used.
 override log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOUT),$1),$(info $1))
 
+# $1 is a separator. $2 is a space-separated list of pairs, with $1 between the two elements. $3 is the target string.
+# E.g. `$(call pairwise_subst,>>>,1>>>11 3>>>33 5>>>55,1 2 3 4 5 6)` returns `11 2 33 4 55 6`.
+# You can also use `%` in both pair elements to replace with a pattern.
+override pairwise_subst = $(if $2,$(call pairwise_subst_low,$1,$(subst $1, ,$(firstword $2)),$3,$(wordlist 2,$(words $2),$2)),$3)
+override pairwise_subst_low = $(if $(filter-out 1 2,$(words $2)),$(error The separator can't appear more than once per element))$(call pairwise_subst,$1,$4,$(patsubst $(word 1,$2),$(word 2,$2),$3))
+
 
 # --- Archive support ---
 
@@ -119,6 +125,8 @@ language_list :=
 override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x))))
 override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess language from filename: $1))
 
+override bad_lib_flags_sep := >>>
+
 # Everything should be mostly self-explanatory.
 # `language_outputs_deps` describes whether an extra `.d` file is created or not (don't define it if not).
 # In `language_command`:
@@ -130,7 +138,7 @@ override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess langu
 language_list += c
 override language_name-c := C
 override language_pattern-c := *.c
-override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(filter-out $(__projsetting_ignored_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
 override language_outputs_deps-c := y
 override language_link-c = $(CC)
 override language_pchflag-c := -xc-header
@@ -138,7 +146,7 @@ override language_pchflag-c := -xc-header
 language_list += cpp
 override language_name-cpp := C++
 override language_pattern-cpp := *.cpp
-override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(filter-out $(__projsetting_ignored_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
 override language_outputs_deps-cpp := y
 override language_link-cpp = $(CXX)
 override language_pchflag-cpp := -xc++-header
@@ -188,7 +196,7 @@ override Project = \
 	$(call var,proj_list += $2)\
 	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
 
-override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch libs ignored_lib_flags lang
+override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch libs bad_lib_flags lang
 
 # On success, assigns $2 to variable `__projsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
@@ -201,7 +209,7 @@ override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags 
 # * flags_func - a function name to determine extra per-file flags. The function is given the source filename as $1, and can return flags if it wants to.
 # * pch - the name of a precompiled header.
 # * libs - a space-separated list of libraries created with $(Library), or `*` to use all libraries.
-# * ignored_lib_flags - those flags are removed from the library flags (both cflags and ldflags).
+# * bad_lib_flags - those flags are removed from the library flags (both cflags and ldflags). You can also use replacements here, in the form of `a>>>b`, which may contain `%`.
 # * lang - either `c` or `cpp`. Sets the language for linking and PCH.
 override ProjectSetting = \
 	$(if $(filter-out $(proj_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid project setting `$1`, expected one of: $(proj_setting_names)))\
@@ -463,6 +471,9 @@ $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_dep
 	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))
 	$(call, Run the build system.)
 	$(buildsystem-$(__build_sys))
+	$(call, Fix some crap.)
+	$(call, * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)
+	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)
 	$(call, On success, move the log to the right location.)
 	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))
 	$(call log_now,[Library] >>> Done)
@@ -655,7 +666,7 @@ $(__filename): override __proj := $(__proj)
 $(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj))
 	$(call log_now,[$(__proj)] [$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
 	@$(language_link-$(__projsetting_lang_$(__proj))) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
-		$(filter-out $(__projsetting_ignored_lib_flags_$(__proj)),$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj)))) \
+		$(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$(__proj)),$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj)))) \
 		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj))
 
 ifeq ($(__proj_kind_$(__proj)),exe)
