@@ -753,14 +753,16 @@ override buildsystem-copy_files = \
 
 override buildsystem-cmake = \
 	$(call log_now,[Library] >>> Configuring CMake...)\
+	$(call, Add dependency include directories to compiler flags. Otherwise OpenAL can't find SDL2.)\
+	$(call var,__include_paths := $(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),-I$(call quote,$(abspath $x)/include)))\
 	$(call safe_shell_exec,cmake\
 		-S $(call quote,$(__source_dir))\
 		-B $(call quote,$(__build_dir))\
 		-Wno-dev\
 		-DCMAKE_C_COMPILER=$(call quote,$(subst $(space),;,$(CC)))\
 		-DCMAKE_CXX_COMPILER=$(call quote,$(subst $(space),;,$(CXX)))\
-		-DCMAKE_C_FLAGS=$(call quote,$(CFLAGS))\
-		-DCMAKE_CXX_FLAGS=$(call quote,$(CXXFLAGS))\
+		-DCMAKE_C_FLAGS=$(call quote,$(CFLAGS) $(__include_paths))\
+		-DCMAKE_CXX_FLAGS=$(call quote,$(CXXFLAGS) $(__include_paths))\
 		-DCMAKE_EXE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_MODULE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_SHARED_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
@@ -769,7 +771,9 @@ override buildsystem-cmake = \
 		-DCMAKE_INSTALL_PREFIX=$(call quote,$(__install_dir))\
 		$(call, I'm not sure why abspath is needed here, but stuff doesn't work otherwise. Tested on libvorbis depending on libogg.)\
 		$(call, Note the fancy logic that attempts to support spaces in paths.)\
-		-DCMAKE_SYSTEM_PREFIX_PATH=$(call quote,$(abspath $(__install_dir))$(subst $(space);,;,$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),;$(abspath $x))))\
+		-DCMAKE_PREFIX_PATH=$(call quote,$(abspath $(__install_dir))$(subst $(space);,;,$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),;$(abspath $x))))\
+		$(call, Prevent CMake from finding system packages. Tested on freetype2, which finds system zlib otherwise.)\
+		-DCMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF\
 		$(if $(CMAKE_GENERATOR),$(call quote,-G$(CMAKE_GENERATOR)))\
 		$(__libsetting_cmake_flags_$(__lib_name))\
 		>>$(call quote,$(__log_path))\
