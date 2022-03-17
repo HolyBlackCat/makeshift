@@ -287,10 +287,15 @@ LINKER :=# E.g. `lld` or `lld-13`. Can be empty to use the default one.
 ALLOW_PCH := 1# If 0 or empty, disable PCH.
 
 # Used both when compiling and linking. Those are set automatically.
-# Note `=` instead of `:=`, since LINKER is set later.
-COMMON_FLAGS_IMPLICIT = -fPIC
+COMMON_FLAGS_IMPLICIT :=
+ifneq ($(TARGET_OS),windows)
+# Without this we can't build shared libraries.
+# Also libfmt is known to produce static libs without this flag, meaning they can't later be linked into our shared libs.
+COMMON_FLAGS_IMPLICIT += -fPIC
+endif
 ifneq ($(MAKE_TERMERR),)
-COMMON_FLAGS_IMPLICIT += -fdiagnostics-color=always# -Otarget messes with the colors, so we fix it here.
+# -Otarget messes with the colors, so we fix it here.
+COMMON_FLAGS_IMPLICIT += -fdiagnostics-color=always
 endif
 
 # Libraries are built here.
@@ -585,6 +590,8 @@ override all_source_files := $(sort $(foreach x,$(proj_list),$(__proj_allsources
 
 # Determine language for each project, if not specified.
 $(foreach x,$(proj_list),$(if $(__projsetting_lang_$x),,$(call var,__projsetting_lang_$x := cpp)))
+# Handle `libs=*`, which means 'all known libraries'.
+$(foreach x,$(proj_list),$(if $(findstring $(__projsetting_libs_$x),*),$(call var,__projsetting_libs_$x := $(all_libs))))
 
 # Given source filenames $1 and a project $2, returns the resulting dependency output files, if any. Some languages don't generate them.
 override source_files_to_dep_outputs = $(strip $(foreach x,$1,$(if $(language_outputs_deps-$(call guess_lang_from_filename,$x)),$(OBJ_DIR)/$(os_mode_string)/$2/$x.d)))
@@ -785,6 +792,9 @@ override buildsystem-cmake = \
 		-DCMAKE_PREFIX_PATH=$(call quote,$(abspath $(__install_dir))$(subst $(space);,;,$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),;$(abspath $x))))\
 		$(call, Prevent CMake from finding system packages. Tested on freetype2, which finds system zlib otherwise.)\
 		-DCMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF\
+		$(call, This is only useful when cross-compiling, to undo the effects of CMAKE_FIND_ROOT_PATH in a toolchain file, which otherwise restricts library search to that path.)\
+		$(call, This also resets the install path, so we need to specify it again with installing.)\
+		-DCMAKE_STAGING_PREFIX=/\
 		$(if $(CMAKE_GENERATOR),$(call quote,-G$(CMAKE_GENERATOR)))\
 		$(__libsetting_cmake_flags_$(__lib_name))\
 		>>$(call quote,$(__log_path))\
@@ -792,7 +802,8 @@ override buildsystem-cmake = \
 	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,cmake --build $(call quote,$(__build_dir)) >>$(call quote,$(__log_path)) -j$(JOBS))\
 	$(call log_now,[Library] >>> Installing...)\
-	$(call safe_shell_exec,cmake --install $(call quote,$(__build_dir)) >>$(call quote,$(__log_path)))\
+	$(call, Note that we must specify the install path again, see the use of CMAKE_STAGING_PREFIX above.)\
+	$(call safe_shell_exec,cmake --install $(call quote,$(__build_dir)) --prefix $(call quote,$(__install_dir)) >>$(call quote,$(__log_path)))\
 
 override buildsystem-configure_make = \
 	$(call var,__bs_shell_vars := $(env_vars_for_shell) $(__libsetting_configure_vars_$(__lib_name)))\
