@@ -379,9 +379,9 @@ override ALLOW_PCH := $(filter-out 0,$(ALLOW_PCH))
 # --- Print header ---
 
 ifeq ($(TARGET_OS),$(HOST_OS))
-$(info [Env] $(TARGET_OS), $(MODE))
+$(info [Mode] $(MODE))
 else
-$(info [Env] $(HOST_OS)->$(TARGET_OS), $(MODE))
+$(info [Mode] $(HOST_OS)->$(TARGET_OS), $(MODE))
 endif
 
 
@@ -679,14 +679,18 @@ $(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)
 ifeq ($(__proj_kind_$(__proj)),exe)
 # A target to run the project.
 .PHONY: run-$(__proj)
+run-$(__proj): override __proj := $(__proj)
 run-$(__proj): override __filename := $(__filename)
 run-$(__proj): $(__filename)
+	$(call log_now,[Running] $(__proj))
 	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
 
 # A target to run the project without compiling it.
 .PHONY: run-old-$(__proj)
+run-old-$(__proj): override __proj := $(__proj)
 run-old-$(__proj): override __filename := $(__filename)
 run-old-$(__proj):
+	$(call log_now,[Running old version] $(__proj))
 	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
 
 # Copies of the same targets to run the first projects.
@@ -695,7 +699,7 @@ override __had_any_exe_proj := 1
 .PHONY: run-default
 run-default: run-$(__proj)
 .PHONY: run-old-default
-run-old-default: run-$(__proj)
+run-old-default: run-old-$(__proj)
 endif
 endif
 
@@ -766,7 +770,10 @@ override buildsystem-copy_files = \
 	$(call log_now,[Library] >>> Copying files...)\
 	$(call, Make sure we know what files to copy.)\
 	$(if $(__libsetting_copy_files_$(__lib_name)),,$(error Must specify the `copy_files` setting for the `copy_files` build system))\
+	$(call, Actually copy the files.)\
 	$(foreach x,$(__libsetting_copy_files_$(__lib_name)),$(call safe_shell_exec,cp -rT $(call quote,$(__source_dir)/$(word 1,$(subst ->, ,$x))) $(call quote,$(__install_dir)/$(word 2,$(subst ->, ,$x)))))\
+	$(call, Destroy the original extracted directory to save space.)\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))\
 	$(file >$(__log_path),)
 
 override buildsystem-cmake = \
