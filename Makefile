@@ -196,7 +196,7 @@ override Project = \
 	$(call var,proj_list += $2)\
 	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
 
-override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch libs bad_lib_flags lang
+override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch deps libs bad_lib_flags lang
 
 # On success, assigns $2 to variable `__projsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
@@ -208,6 +208,7 @@ override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags 
 # * common_flags - those are added to both `{c,cxx}flags` and `ldflags`.
 # * flags_func - a function name to determine extra per-file flags. The function is given the source filename as $1, and can return flags if it wants to.
 # * pch - the name of a precompiled header.
+# * deps - a space-separated list of projects that this project depends on.
 # * libs - a space-separated list of libraries created with $(Library), or `*` to use all libraries.
 # * bad_lib_flags - those flags are removed from the library flags (both cflags and ldflags). You can also use replacements here, in the form of `a>>>b`, which may contain `%`.
 # * lang - either `c` or `cpp`. Sets the language for linking and PCH.
@@ -625,7 +626,7 @@ $(__output): override __output := $(__output)
 $(__output): override __proj := $(__proj)
 
 $(__output): $(__src) $(call lib_name_to_log_path,$(all_libs))
-	$(call log_now,[$(__proj)] [$(language_name-$(__lang)) PCH] $<)
+	$(call log_now,[$(language_name-$(__lang)) PCH] $<)
 	@$(call language_command-$(__lang),$<,$@,$(__proj),$(language_pchflag-$(__projsetting_lang_$(__proj))))
 endef
 
@@ -651,7 +652,7 @@ $(__outputs) &: override __pch_src := $(__pch_src)
 $(__outputs) &: override __pch := $(__pch)
 
 $(__outputs): $(__src) $(if $(ALLOW_PCH),$(__pch)) $(call lib_name_to_log_path,$(all_libs))
-	$(call log_now,[$(__proj)] [$(language_name-$(__lang))] $<)
+	$(call log_now,[$(language_name-$(__lang))] $<)
 	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj),$(if $(__pch),-include$(if $(ALLOW_PCH),$(patsubst %.gch,%,$(__pch)),$(__pch_src))))
 endef
 
@@ -664,17 +665,21 @@ override define codesnippet_link =
 # Link result.
 override __filename := $(call proj_output_filename,$(__proj))
 
+# Check that we only depend on shared library projects.
+$(foreach x,$(__projsetting_deps_$(__proj)),$(if $(filter shared,$(__proj_kind_$x)),,$(error Can't depend on `$x`, it's not a library project)))
+
 # A user-friendly link target.
 .PHONY: proj-$(__proj)
 proj-$(__proj): $(__filename)
 
 # The actual link target.
 $(__filename): override __proj := $(__proj)
-$(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj))
-	$(call log_now,[$(__proj)] [$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
+$(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj)) $(call proj_output_filename,$(__projsetting_deps_$(__proj)))
+	$(call log_now,[$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
 	@$(language_link-$(__projsetting_lang_$(__proj))) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
 		$(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$(__proj)),$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj)))) \
-		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj))
+		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj)) \
+		-L$(call quote,$(BIN_DIR)/$(os_mode_string)) $(patsubst $(PREFIX_shared)%$(EXT_shared),-l%,$(notdir $(call proj_output_filename,$(__projsetting_deps_$(__proj)))))
 
 ifeq ($(__proj_kind_$(__proj)),exe)
 # A target to run the project.
