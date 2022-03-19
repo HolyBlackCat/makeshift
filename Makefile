@@ -20,6 +20,9 @@ unexport MAKEFLAGS
 override LANG :=
 export LANG
 
+# Set the default target.
+.DEFAULT_GOAL :=  run-default
+
 
 # --- Define contants ---
 
@@ -35,6 +38,9 @@ override proj_dir := $(patsubst ./,.,$(dir $(firstword $(MAKEFILE_LIST))))
 
 # A string of all single-letter Make flags, without spaces.
 override single_letter_makeflags = $(filter-out -%,$(firstword $(MAKEFLAGS)))
+
+# If non-empty, we're probably running a tab completion in a shell right now. Avoid raising errors.
+override running_tab_completion := $(and $(findstring p,$(single_letter_makeflags)),$(findstring q,$(single_letter_makeflags)))
 
 
 # --- Define functions ---
@@ -192,6 +198,7 @@ override proj_kind_name-shared := Shared library
 # $2 is the project name, or a space-separated list of them.
 # A list is not recommended, because ProjectSetting always applies only to the last library.
 override Project = \
+	$(if $(filter-out 1,$(words $1)),$(error Project name must be a single word))\
 	$(if $(or $(filter-out $(proj_kind_names),$1),$(filter-out 1,$(words $1))),$(error Project kind must be one of: $(proj_kind_names)))\
 	$(call var,proj_list += $2)\
 	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
@@ -216,6 +223,21 @@ override ProjectSetting = \
 	$(if $(filter-out $(proj_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid project setting `$1`, expected one of: $(proj_setting_names)))\
 	$(if $(filter 0,$(words $(proj_list))),$(error Must specify project settings after a project))\
 	$(call var,__projsetting_$(strip $1)_$(lastword $(proj_list)) := $2)
+
+override mode_list :=
+
+# Creates a new build mode $1. Use `ModeSetting` to configure it.
+override Mode = \
+	$(if $(filter-out 1,$(words $1)),$(error Mode name must be a single word))\
+	$(call var,mode_list += $1)
+
+# Sets a mode-specific variable $1 to value $2.
+# Any variable can be assigned this way, so the name is not checked.
+# You can mention the target variable in $2 to append to its old value, using the usual syntax. Dollars appear to work in the variables, assuming you escape them using $$.
+override ModeSetting = \
+	$(if $(filter 0,$(words $(mode_list))),$(error Must specify mode settings after a mode))\
+	$(if $(filter-out 1,$(words $1)),$(error Mode variable name must be a single word))\
+	$(call var,__modevar_$(lastword $(mode_list))_$(strip $1) := $2)
 
 
 # --- Set default values before loading configs ---
@@ -309,20 +331,28 @@ OBJ_DIR := $(proj_dir)/obj
 BIN_DIR := $(proj_dir)/bin
 
 
-# --- Load configs from current and parent directories ---
+# --- Load config files ---
 
-# The expected file name. In those files, use $(here) to get the location of the current file.
-override config_filename := local_config.mk
-override load_parent_configs = $(call load_parent_configs_low,$1,$2,$1/..,$(abspath $1/..))
-override load_parent_configs_low = $(if $(findstring $2,$4),,$(call load_parent_configs,$3,$4))$(call var,here := $1)$(eval -include $1/$(config_filename))
-$(call load_parent_configs,$(proj_dir),$(abspath $(proj_dir)))
-override undefine here
+# Project config.
+P := $(proj_dir)/project.mk
+include $P
+
+# For each file in $1, modifies the name to include `.default` before the extension, e.g. `foo.json` -> `foo.default.json`.
+override generation_source_for_file = $(foreach x,$1,$(basename $x).default$(suffix $x))
+
+# Local config. Copy it from a default file, if necessary.
+LOCAL_CONFIG := $(proj_dir)/local_config.mk
+ifneq ($(wildcard $(LOCAL_CONFIG)),)
+include $(LOCAL_CONFIG)
+else ifneq ($(wildcard $(call generation_source_for_file,$(LOCAL_CONFIG))),)
+$(info Copying `$(call generation_source_for_file,$(LOCAL_CONFIG))` -> `$(LOCAL_CONFIG)`)
+$(call safe_shell_exec,cp -f $(call quote,$(call generation_source_for_file,$(LOCAL_CONFIG))) $(call quote,$(LOCAL_CONFIG)))
+include $(LOCAL_CONFIG)
+endif
 
 
 # --- Fall back to default compiler if not specified ---
 
-# Without this condition, the compiler detection messes with the tab completion for Make in the shell.
-ifeq ($(findstring p,$(single_letter_makeflags)),)
 # $1 is a clang tool name, e.g. `clang` or `clang++`.
 # On success, returns the same tool, possibly suffixed with a version.
 # Raises an error on failure.
@@ -339,15 +369,34 @@ endif
 ifeq ($(LINKER),)
 override LINKER := $(call find_versioned_tool,lld)
 endif
-endif
-
-
-# --- Load project file ---
-P := $(proj_dir)/project.mk
-include $P
 
 
 # --- Finalize config ---
+
+# Check build mode, update it if necessary.
+ifeq ($(mode_list),)
+ # No mode list.
+ ifeq ($(MODE),)
+  # And no mode. Set the default one, since we use this string in file paths.
+MODE := generic
+ endif
+else
+ # We have a mode list.
+ ifneq ($(running_tab_completion),)
+  # If we're running a tab completion and there is no mode, use the default mode, and don't check for errors.
+  $(if $(MODE),,$(call var,MODE := generic))
+ else
+  # Make sure the specified mode is listed in the list.
+  $(if $(filter 0,$(words $(MODE))),$(error Build mode is not set.$(lf)To set the mode once, add `MODE=...` to flags, one of: $(mode_list)$(lf)To set it permanently, use `make remember-mode MODE=...`))
+  $(if $(filter-out 1,$(words $(MODE))),$(error MODE must be a single word))
+  $(if $(filter $(MODE),$(mode_list)),,$(error MODE must be one of: $(mode_list)))
+ endif
+endif
+# Strip, just in case.
+override MODE := $(strip $(MODE))
+# Load mode variables.
+$(foreach x,$(filter __modevar_$(MODE)_%,$(.VARIABLES)),$(call var,$(patsubst __modevar_$(MODE)_%,%,$x) := $($x)))
+
 
 # Note that we can't add the flags to CC, CXX.
 # It initially looked like we can, if we then do `-DCMAKE_C_COMPILER=$(subst $(space,;,$(CC))`, but CMake seems to ignore those extra flags. What a shame.
@@ -363,9 +412,6 @@ override undefine COMMON_FLAGS_IMPLICIT
 
 override LDFLAGS := $(if $(LINKER),-fuse-ld=$(LINKER)) $(LDFLAGS)
 
-ifeq ($(MODE),)
-MODE := generic
-endif
 
 # Use this string in paths to mode-specific files.
 override os_mode_string := $(TARGET_OS)/$(MODE)
@@ -611,8 +657,14 @@ override source_files_to_output_list = $(call source_files_to_main_outputs,$1,$2
 # Given a list of projects $1, returns the link results they produce.
 override proj_output_filename = $(foreach x,$1,$(BIN_DIR)/$(os_mode_string)/$(PREFIX_$(__proj_kind_$x))$x$(EXT_$(__proj_kind_$x)))
 
-# Given a project name $1, generates an assignment to an environment variable, configuring the
-override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(subst $(space),:,$(foreach x,$(__projsetting_libs_$1),$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib)))
+# Given a list of projects $1, recursively finds all their library dependencies.
+override proj_recursive_lib_deps = $(sort $(call proj_recursive_lib_deps_low,$1))
+override proj_recursive_lib_deps_low = $(if $1,$(foreach x,$1,$(__projsetting_libs_$x)) $(call proj_recursive_lib_deps_low,$(foreach x,$1,$(__projsetting_deps_$x))))
+
+# Given a project name $1, generates an assignment to an environment variable, configuring the library search path.
+# The variable will point to the output directory, plus all libraries used by this project or its dependencies, recursively.
+override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(call proj_library_path_value,$1))
+override proj_library_path_value = $(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib))
 
 # A template for PCH targets.
 # The only input variable is `__proj`, the project name.
@@ -698,13 +750,9 @@ run-old-$(__proj):
 	$(call log_now,[Running old version] $(__proj))
 	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
 
-# Copies of the same targets to run the first projects.
-ifeq ($(__had_any_exe_proj),)
-override __had_any_exe_proj := 1
-.PHONY: run-default
-run-default: run-$(__proj)
-.PHONY: run-old-default
-run-old-default: run-old-$(__proj)
+# If this is the first exe project, consider it to be the default.
+ifeq ($(default_exe_proj),)
+override default_exe_proj := $(__proj)
 endif
 endif
 
@@ -716,6 +764,9 @@ clean-this-os-this-mode-$(__proj):
 	$(call safe_shell_exec,rm -rf $(call quote,$(OBJ_DIR)/$(os_mode_string)/$(__proj)))
 	@true
 endef
+
+# The first executable project if any, considered to be the default one.
+override default_exe_proj :=
 
 # Generate link targets.
 $(foreach x,$(proj_list),$(call var,__proj := $x)$(eval $(value codesnippet_link)))
@@ -730,7 +781,22 @@ override targets_needing_dirs += $(foreach x,$(proj_list),$(call proj_output_fil
 $(foreach x,$(targets_needing_dirs),$(eval $x: | $(dir $x)))
 $(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call quote,$x)))
 
-# Cleaning targets. Those ignore libraries.
+# If we have a default project, add some targets for it.
+ifneq ($(default_exe_proj),)
+.PHONY: proj-default
+proj-default: proj-$(default_exe_proj)
+.PHONY: run-default
+run-default: run-$(default_exe_proj)
+.PHONY: run-old-default
+run-old-default: run-old-$(default_exe_proj)
+endif
+
+# Various targets.
+
+.PHONY: all
+all: $(call proj_output_filename,$(proj_list))
+
+# Cleaning targets. Those ignore libraries, unless specified otherwise.
 
 .PHONY: clean
 clean:
@@ -747,9 +813,50 @@ clean-this-os-this-mode:
 	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)/$(os_mode_string)) $(call quote,$(OBJ_DIR)/$(os_mode_string)))
 	@true
 
-.DEFAULT_GOAL := foo
-foo: libs
-	echo $$CC
+.PHONY: clean-including-libs
+clean-including-libs: clean clean-libs
+
+.PHONY: clean-this-os-including-libs
+clean-this-os-including-libs: clean-this-os clean-libs-this-os
+
+.PHONY: clean-this-os-this-mode-including-libs
+clean-this-os-this-mode-including-libs: clean-this-os-this-mode clean-libs-this-os-this-mode
+
+
+# --- Utility targets ---
+
+# Added before the current mode when saving it to the config.
+override mode_config_prefix := MODE :=
+
+# Those files are regenerated on mode change. E.g. `foo.json` is generated from `foo.default.json`.
+# In them, following replacements are made:
+# * `<MAIN_EXECUTABLE>` -> the output executable of the default project
+# * `<LIBRARY_PATH>` -> the library search path for the main project
+# * `<LIBRARY_PATH_VAR>` -> the env variable name that `<LIBRARY_PATH>` should be assigned to - either `PATH` or `LD_LIBRARY_PATH`.
+GENERATE_ON_MODE_CHANGE := $(proj_dir)/.vscode/launch.json
+# Remove files with missing original files.
+override GENERATE_ON_MODE_CHANGE := $(foreach x,$(GENERATE_ON_MODE_CHANGE),$(if $(wildcard $(call generation_source_for_file,$x)),$x))
+
+# Writes the current MODE to the local config.
+.PHONY: remember-mode
+remember-mode:
+	$(call, Check if the local config already has a mode assignment.)
+	$(if $(filter-out 0,$(call shell_status,grep $(call quote,$(mode_config_prefix)) $(call quote,$(LOCAL_CONFIG)))),\
+		$(call, No mode assignment in the local config, create it.)\
+		$(file >>$(LOCAL_CONFIG),)\
+		$(file >>$(LOCAL_CONFIG),$(mode_config_prefix) $(MODE))\
+	,\
+		$(call, Already have a mode assignment in the local config, modify it.)\
+		$(call safe_shell_exec,sed -i 's/.*$(mode_config_prefix).*/$(mode_config_prefix) $(MODE)/' $(call quote,$(LOCAL_CONFIG)))\
+	)
+	$(call, Regenerate some files.)
+	$(foreach x,$(GENERATE_ON_MODE_CHANGE),\
+		$(call safe_shell_exec,cp $(call quote,$(call generation_source_for_file,$x)) $(call quote,$x))\
+		$(call safe_shell_exec,sed -i 's|<MAIN_EXECUTABLE>|$(call proj_output_filename,$(default_exe_proj))|' $(call quote,$x))\
+		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH>|$(call proj_library_path_value,$(default_exe_proj))|' $(call quote,$x))\
+		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH_VAR>|$(LIBRARY_PATH_VAR)|' $(call quote,$x))\
+	)
+	@true
 
 
 # --- Build system definitions ---
