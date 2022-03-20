@@ -93,6 +93,18 @@ override log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOU
 override pairwise_subst = $(if $2,$(call pairwise_subst_low,$1,$(subst $1, ,$(firstword $2)),$3,$(wordlist 2,$(words $2),$2)),$3)
 override pairwise_subst_low = $(if $(filter-out 1 2,$(words $2)),$(error The separator can't appear more than once per element))$(call pairwise_subst,$1,$4,$(patsubst $(word 1,$2),$(word 2,$2),$3))
 
+# Given a word, matches it against a set of rule. Returns the name of the first matching rule, or empty string on failure.
+# $4 is the target word.
+# $3 is a list of space-separated rules, where each rule is `<pattens>$1<name>`, where patterns are separated by $2 and can contain %.
+# Example: `$(call find_first_match,->,;,a->letter 1;2;3->number,2)` returns `number`.
+override find_first_match = $(strip\
+	$(if $(filter-out 1,$(words $4)),$(error Input must have exactly one word))\
+	$(foreach x,$3,\
+		$(if $(filter-out 2,$(words $(subst $1, ,$x))),$(error Each element must have exactly one separator))\
+		$(if $(filter $(subst $2, ,$(firstword $(subst $1, ,$x))),$4),$(lastword $(subst $1, ,$x)))\
+	)\
+)
+
 
 # --- Archive support ---
 
@@ -123,15 +135,19 @@ override archive_is-ZIP = $(filter %.zip,$1)
 override archive_extract-ZIP = $(call safe_shell_exec,unzip $(call quote,$1) -d $(call quote,$2))
 
 
+# --- Build system detection config ---
+
+# It must be up here, to allow modifications from the configs.
+
+# Modify this variable to tweak build system detection.
+# Order matters, the first match is used.
+# A space separated list of `<filename>-><buildsystem>`.
+buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
+
+
 # --- Language definitions ---
 
 language_list :=
-
-# Given filename $1, tries to guess the language. Causes an error on failure.
-override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x))))
-override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess language from filename: $1))
-
-override bad_lib_flags_sep := >>>
 
 # Everything should be mostly self-explanatory.
 # `language_outputs_deps` describes whether an extra `.d` file is created or not (don't define it if not).
@@ -144,7 +160,7 @@ override bad_lib_flags_sep := >>>
 language_list += c
 override language_name-c := C
 override language_pattern-c := *.c
-override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(call proj_filtered_flags,cflags,$3) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
 override language_outputs_deps-c := y
 override language_link-c = $(CC)
 override language_pchflag-c := -xc-header
@@ -152,7 +168,7 @@ override language_pchflag-c := -xc-header
 language_list += cpp
 override language_name-cpp := C++
 override language_pattern-cpp := *.cpp
-override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$3),$(call lib_cache_flags,lib_cflags,$(__projsetting_libs_$3))) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(call proj_filtered_flags,cflags,$3) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
 override language_outputs_deps-cpp := y
 override language_link-cpp = $(CXX)
 override language_pchflag-cpp := -xc++-header
@@ -640,6 +656,17 @@ $(foreach x,$(proj_list),$(if $(__projsetting_lang_$x),,$(call var,__projsetting
 # Handle `libs=*`, which means 'all known libraries'.
 $(foreach x,$(proj_list),$(if $(findstring $(__projsetting_libs_$x),*),$(call var,__projsetting_libs_$x := $(all_libs))))
 
+# Given filename $1, tries to guess the language. Causes an error on failure.
+override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x))))
+override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess language from filename: $1))
+
+# A separator for the `bad_lib_flags` project property.
+override bad_lib_flags_sep := >>>
+
+# Given project $2 and flag type $1 (cflags or ldflags), returns the flags.
+# The flags are filtered according to the project settings, and also are cached.
+override proj_filtered_flags = $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$2),$(call lib_cache_flags,lib_$(strip $1),$(__projsetting_libs_$2)))
+
 # Given source filenames $1 and a project $2, returns the resulting dependency output files, if any. Some languages don't generate them.
 override source_files_to_dep_outputs = $(strip $(foreach x,$1,$(if $(language_outputs_deps-$(call guess_lang_from_filename,$x)),$(OBJ_DIR)/$(os_mode_string)/$2/$x.d)))
 
@@ -729,7 +756,7 @@ $(__filename): override __proj := $(__proj)
 $(__filename): $(call source_files_to_main_outputs,$(__proj_allsources_$(__proj)),$(__proj)) $(call proj_output_filename,$(__projsetting_deps_$(__proj)))
 	$(call log_now,[$(proj_kind_name-$(__proj_kind_$(__proj)))] $@)
 	@$(language_link-$(__projsetting_lang_$(__proj))) $(if $(filter shared,$(__proj_kind_$(__proj))),-shared) -o $@ $(filter %.o,$^) \
-		$(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$(__proj)),$(call lib_cache_flags,lib_ldflags,$(__projsetting_libs_$(__proj)))) \
+		$(call proj_filtered_flags,ldflags,$(__proj)) \
 		$(LDFLAGS) $(__projsetting_common_flags_$(__proj)) $(__projsetting_ldflags_$(__proj)) \
 		-L$(call quote,$(BIN_DIR)/$(os_mode_string)) $(patsubst $(PREFIX_shared)%$(EXT_shared),-l%,$(notdir $(call proj_output_filename,$(__projsetting_deps_$(__proj)))))
 
@@ -870,12 +897,7 @@ remember-mode:
 
 # How to define a build system:
 # * Create a variable named `buildsystem-<name>`, with a sequence of `$(call safe_shell_exec,)` commands, using the variables listed above.
-# * If you want to, modify `buildsystem_detection` to auto-detect your build system.
-
-# Modify this variable to tweak build system detection.
-# Order matters, the first match is used.
-# A space separated list of `<filename>-><buildsystem>`.
-buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
+# * If you want to, modify `buildsystem_detection` above to auto-detect your build system.
 
 
 override buildsystem-copy_files = \
