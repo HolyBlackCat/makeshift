@@ -38,10 +38,14 @@ override comma := ,
 override proj_dir := $(patsubst ./,.,$(dir $(firstword $(MAKEFILE_LIST))))
 
 # A string of all single-letter Make flags, without spaces.
-override single_letter_makeflags = $(filter-out -%,$(firstword $(MAKEFLAGS)))
+override single_letter_makeflags := $(filter-out -%,$(firstword $(MAKEFLAGS)))
 
 # If non-empty, we're probably running a tab completion in a shell right now. Avoid raising errors.
 override running_tab_completion := $(and $(findstring p,$(single_letter_makeflags)),$(findstring q,$(single_letter_makeflags)))
+
+# Prepend this to a recipe line (without space) to run it unbuffered.
+# Normally expands to `+`, but if `-p` or `-q` are used, expands to nothing (to avoid running the line when nothing else runs).
+override run_without_buffering := $(if $(or $(findstring n,$(single_letter_makeflags)),$(findstring q,$(single_letter_makeflags))),,+)
 
 
 # --- Define functions ---
@@ -356,6 +360,8 @@ override abs_path_to_host = $(subst `, ,$(subst $(space),/,$(join $(subst /, ,$(
 else
 override abs_path_to_host = $1
 endif
+
+RUN_WITH :=
 
 
 # --- Load config files ---
@@ -713,8 +719,9 @@ override proj_recursive_lib_deps_low = $(if $1,$(foreach x,$1,$(__projsetting_li
 
 # Given a project name $1, generates an assignment to an environment variable, configuring the library search path.
 # The variable will point to the output directory, plus all libraries used by this project or its dependencies, recursively.
+# We also preserve the original contents of the variable. This is especially important when targeting Windows, since PATH might have system DLLs and/or tools.
 override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(call proj_library_path_value,$1))
-override proj_library_path_value = $(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib))
+override proj_library_path_value = $(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib))$(if $($(LIBRARY_PATH_VAR)),:$($(LIBRARY_PATH_VAR)))
 
 # A template for PCH targets.
 # Input variables are:
@@ -788,7 +795,7 @@ run-$(__proj): override __proj := $(__proj)
 run-$(__proj): override __filename := $(__filename)
 run-$(__proj): $(__filename)
 	$(call log_now,[Running] $(__proj))
-	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
+	@$(run_without_buffering)$(call proj_library_path_prefix,$(__proj)) $(RUN_WITH) $(__filename)
 
 # A target to run the project without compiling it.
 .PHONY: run-old-$(__proj)
@@ -796,7 +803,7 @@ run-old-$(__proj): override __proj := $(__proj)
 run-old-$(__proj): override __filename := $(__filename)
 run-old-$(__proj):
 	$(call log_now,[Running old version] $(__proj))
-	@$(call proj_library_path_prefix,$(__proj)) $(__filename)
+	@$(run_without_buffering)$(call proj_library_path_prefix,$(__proj)) $(RUN_WITH) $(__filename)
 
 # If this is the first exe project, consider it to be the default.
 ifeq ($(default_exe_proj),)
