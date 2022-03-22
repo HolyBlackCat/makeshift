@@ -32,6 +32,7 @@ $(call)
 endef
 
 override space := $(call) $(call)
+override comma := ,
 
 # The directory with the makefile.
 override proj_dir := $(patsubst ./,.,$(dir $(firstword $(MAKEFILE_LIST))))
@@ -97,7 +98,7 @@ override pairwise_subst_low = $(if $(filter-out 1 2,$(words $2)),$(error The sep
 # $4 is the target word.
 # $3 is a list of space-separated rules, where each rule is `<pattens>$1<name>`, where patterns are separated by $2 and can contain %.
 # Example: `$(call find_first_match,->,;,a->letter 1;2;3->number,2)` returns `number`.
-override find_first_match = $(strip\
+override find_first_match = $(firstword\
 	$(if $(filter-out 1,$(words $4)),$(error Input must have exactly one word))\
 	$(foreach x,$3,\
 		$(if $(filter-out 2,$(words $(subst $1, ,$x))),$(error Each element must have exactly one separator))\
@@ -160,7 +161,7 @@ language_list :=
 language_list += c
 override language_name-c := C
 override language_pattern-c := *.c
-override language_command-c = $(CC) $4 -MMD -MP -c $1 -o $2 $(call proj_filtered_flags,cflags,$3) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-c = $(strip $(CC) $(call pch_flag_for_source,$1,$3) $4 -MMD -MP -c $1 $(if $2,-o $2) $(call proj_filtered_flags,cflags,$3) $(CFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cflags_$3) $(call $(__projsetting_flags_func_$3),$1))
 override language_outputs_deps-c := y
 override language_link-c = $(CC)
 override language_pchflag-c := -xc-header
@@ -168,7 +169,7 @@ override language_pchflag-c := -xc-header
 language_list += cpp
 override language_name-cpp := C++
 override language_pattern-cpp := *.cpp
-override language_command-cpp = $(CXX) $4 -MMD -MP -c $1 -o $2 $(call proj_filtered_flags,cflags,$3) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1)
+override language_command-cpp = $(strip $(CXX) $(call pch_flag_for_source,$1,$3) $4 -MMD -MP -c $1 $(if $2,-o $2) $(call proj_filtered_flags,cflags,$3) $(CXXFLAGS) $(__projsetting_common_flags_$3) $(__projsetting_cxxflags_$3) $(call $(__projsetting_flags_func_$3),$1))
 override language_outputs_deps-cpp := y
 override language_link-cpp = $(CXX)
 override language_pchflag-cpp := -xc++-header
@@ -230,7 +231,7 @@ override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags 
 # * ldflags - linker flags.
 # * common_flags - those are added to both `{c,cxx}flags` and `ldflags`.
 # * flags_func - a function name to determine extra per-file flags. The function is given the source filename as $1, and can return flags if it wants to.
-# * pch - the name of a precompiled header.
+# * pch - the PCH configuration. A space-separated list of `patterns->header`, where `header` is the PCH filename and `patters` is a `;`-separated list of source filenames, possibly containing `*`s.
 # * deps - a space-separated list of projects that this project depends on.
 # * libs - a space-separated list of libraries created with $(Library), or `*` to use all libraries.
 # * bad_lib_flags - those flags are removed from the library flags (both cflags and ldflags). You can also use replacements here, in the form of `a>>>b`, which may contain `%`.
@@ -345,6 +346,16 @@ ARCHIVE_DIR := $(proj_dir)/libs
 OBJ_DIR := $(proj_dir)/obj
 # Binaries are written here.
 BIN_DIR := $(proj_dir)/bin
+
+# Compilation commands are written here.
+COMMANDS := $(proj_dir)/compile_commands.json
+
+# Converts a single absolute path from Linux style to host style.
+ifeq ($(HOST_OS),windows)
+override abs_path_to_host = $(subst `, ,$(subst $(space),/,$(join $(subst /, ,$(subst $(space),`,$1)),:)))
+else
+override abs_path_to_host = $1
+endif
 
 
 # --- Load config files ---
@@ -657,11 +668,15 @@ $(foreach x,$(proj_list),$(if $(__projsetting_lang_$x),,$(call var,__projsetting
 $(foreach x,$(proj_list),$(if $(findstring $(__projsetting_libs_$x),*),$(call var,__projsetting_libs_$x := $(all_libs))))
 
 # Given filename $1, tries to guess the language. Causes an error on failure.
-override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x))))
+override guess_lang_from_filename = $(call guess_lang_from_filename_low,$1,$(call guess_lang_from_filename_opt,$1))
 override guess_lang_from_filename_low = $(if $2,$2,$(error Unable to guess language from filename: $1))
+# Same, but returns an empty string on failure.
+override guess_lang_from_filename_opt = $(firstword $(foreach x,$(language_list),$(if $(filter $(subst *,%,$(language_pattern-$x)),$1),$x)))
 
 # A separator for the `bad_lib_flags` project property.
 override bad_lib_flags_sep := >>>
+# A separator for the `pch` project property.
+override pch_rule_sep := ->
 
 # Given project $2 and flag type $1 (cflags or ldflags), returns the flags.
 # The flags are filtered according to the project settings, and also are cached.
@@ -676,6 +691,14 @@ override source_files_to_main_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string
 
 # Given source PCH filenames $1 and a project $2, returns the compiled PCH filename.
 override pch_files_to_outputs = $(patsubst %,$(OBJ_DIR)/$(os_mode_string)/$2/%.gch,$1)
+# Same, but if `ALLOW_PCH` is false, returns the arguments unchanged.
+override pch_files_to_outputs_or_orig = $(if $(ALLOW_PCH),$(call pch_files_to_outputs,$1,$2),$1)
+
+# Given a source file $1 and a project $2, returns the PCH header for it, if any.
+override pch_header_for_source = $(if $(language_pchflag-$(call guess_lang_from_filename_opt,$1)),$(call find_first_match,$(pch_rule_sep),;,$(subst *,%,$(__projsetting_pch_$2)),$1))
+# Given a source file $1 and a project $2, returns the PCH flag for it, if any.
+override pch_flag_for_source = $(call pch_flag_for_source_low,$(call pch_header_for_source,$1,$2))
+override pch_flag_for_source_low = $(if $1,-include$(patsubst %.gch,%,$1))
 
 # Given source filenames $1 and a project $2, returns all outputs for them. Might return more elements than in $1, but never less.
 # The first resulting element will always be the main output.
@@ -694,15 +717,16 @@ override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(call proj
 override proj_library_path_value = $(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib))
 
 # A template for PCH targets.
-# The only input variable is `__proj`, the project name.
+# Input variables are:
+# * __proj - the project name.
+# * __src - the header filename.
 override define codesnippet_pch =
-# Source filename.
-override __src := $(__projsetting_pch_$(__proj))
 # Output filename.
 override __output := $(call pch_files_to_outputs,$(__src),$(__proj))
 
 $(__output): override __output := $(__output)
 $(__output): override __proj := $(__proj)
+$(__output): override __lang := $(__projsetting_lang_$(__proj))
 
 $(__output): $(__src) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(language_name-$(__lang)) PCH] $<)
@@ -710,7 +734,7 @@ $(__output): $(__src) $(call lib_name_to_log_path,$(all_libs))
 endef
 
 # Generate PCH targets.
-$(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call var,__proj := $x)$(eval $(value codesnippet_pch))))
+$(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call var,__proj := $x)$(foreach y,$(__projsetting_pch_$x),$(call var,__src := $(lastword $(subst $(pch_rule_sep), ,$y)))$(eval $(value codesnippet_pch)))))
 
 # A template for object file targets.
 # Input variables:
@@ -719,20 +743,17 @@ $(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call var,__proj := $x)$(eval $(valu
 override define codesnippet_object =
 # Output filenames.
 override __outputs := $(call source_files_to_output_list,$(__src),$(__proj))
-# The source PCH, if any.
-override __pch_src := $(__projsetting_pch_$(__proj))
 # The compiled PCH, if any.
-override __pch := $(call pch_files_to_outputs,$(__pch_src),$(__proj))
+override __pch := $(call pch_files_to_outputs_or_orig,$(call pch_header_for_source,$(__src),$(__proj)),$(__proj))
 
 $(__outputs) &: override __outputs := $(__outputs)
 $(__outputs) &: override __proj := $(__proj)
 $(__outputs) &: override __lang := $(call guess_lang_from_filename,$(__src))
-$(__outputs) &: override __pch_src := $(__pch_src)
 $(__outputs) &: override __pch := $(__pch)
 
-$(__outputs): $(__src) $(if $(ALLOW_PCH),$(__pch)) $(call lib_name_to_log_path,$(all_libs))
+$(__outputs): $(__src) $(__pch) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(language_name-$(__lang))] $<)
-	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj),$(if $(__pch),-include$(if $(ALLOW_PCH),$(patsubst %.gch,%,$(__pch)),$(__pch_src))))
+	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj))
 endef
 
 # Generate object file targets.
@@ -849,6 +870,21 @@ clean-this-os-including-libs: clean-this-os clean-libs-this-os
 .PHONY: clean-this-os-this-mode-including-libs
 clean-this-os-this-mode-including-libs: clean-this-os-this-mode clean-libs-this-os-this-mode
 
+# `compile_commands.json` target.
+
+# Double-quotes a string.
+override doublequote = "$(subst `,\\,$(subst ",\",$(subst \,`,$1)))"
+
+.PHONY: commands
+commands:
+	$(call var,__curdir := $(call doublequote,$(call abs_path_to_host,$(abspath $(proj_dir)))))
+	$(call var,__first := 1)
+	$(file >$(COMMANDS),[)
+	$(foreach x,$(proj_list),$(foreach y,$(__proj_allsources_$x),\
+		$(file >>$(COMMANDS),   $(if $(__first),$(call var,__first :=) ,$(comma)){"directory": $(__curdir), "file": $(call doublequote,$(abspath $y)), "command":$(call doublequote,$(call language_command-$(call guess_lang_from_filename,$y),$y,,$x))})\
+	))
+	$(file >>$(COMMANDS),])
+	@true
 
 # --- Utility targets ---
 
