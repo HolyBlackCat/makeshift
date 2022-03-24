@@ -881,6 +881,8 @@ override targets_needing_dirs :=
 override targets_needing_dirs += $(foreach x,$(proj_list),$(call source_files_to_output_list,$(__proj_allsources_$x),$x))
 # * The link results:
 override targets_needing_dirs += $(foreach x,$(proj_list),$(call proj_output_filename,$x))
+# * Compiled PCHs:
+override targets_needing_dirs += $(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call pch_files_to_outputs,$(foreach y,$(__projsetting_pch_$x),$(lastword $(subst $(pch_rule_sep), ,$y))),$x)))
 # Generate the directory targets.
 $(foreach x,$(targets_needing_dirs),$(eval $x: | $(dir $x)))
 $(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call quote,$x)))
