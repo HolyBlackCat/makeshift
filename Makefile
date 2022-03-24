@@ -311,16 +311,18 @@ export CXXFLAGS :=
 export CPPFLAGS :=
 export LDFLAGS :=
 
-# LDD. Quasi-MSYS2 sets this env variable.
+# LDD. We don't care about the Quasi-MSYS2's `win-ldd` wrapper since we can convert paths ourselves. We need it for the native Winwdows anyway.
 # Also an optional program to preprocess the paths from LDD.
-LDD_PREPROCESS_PATHS :=
 ifeq ($(TARGET_OS),windows)
-LDD ?= ntldd -R
+LDD := ntldd -R
 ifeq ($(HOST_OS),windows)
-LDD_PREPROCESS_PATHS := cygpath -u
+LDD_PREPROCESS_PATHS = cygpath -u $1
+else
+LDD_PREPROCESS_PATHS = realpath `winepath -u $1`
 endif
 else
-LDD ?= ldd
+LDD := ldd
+LDD_PREPROCESS_PATHS =
 endif
 
 # Patchelf command, if necessary.
@@ -994,8 +996,8 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(info [Dist] Parsed LDD output: $(__libs))
 	$(call, ### Remove library names from output, leave only paths.)
 	$(call var,__libs := $(foreach x,$(__libs),$(word 2,$(subst =>, ,$x))))
-	$(call, ### Preprocess paths. On native Windows this runs cygpath to convert them to unix-style.)
-	$(if $(LDD_PREPROCESS_PATHS),$(call var,__libs := $(call safe_shell,$(LDD_PREPROCESS_PATHS) $(foreach x,$(__libs),$(call quote,$x)))))
+	$(call, ### Preprocess paths. On native Windows this runs cygpath to convert them to unix-style. On Wine this runs Winepath.)
+	$(if $(value LDD_PREPROCESS_PATHS),$(call var,__libs := $(call safe_shell,$(call LDD_PREPROCESS_PATHS,$(foreach x,$(__libs),$(call quote,$x))))))
 	$(call, ### Make paths relative. At least Quasi-MSYS2 win-ldd needs this.)
 	$(call var,__libs := $(subst $(abspath $(proj_dir)),$(proj_dir),$(__libs)))
 	$(info [Dist] Preprocessed LDD output: $(__libs))
