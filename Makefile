@@ -279,7 +279,7 @@ endif
 # Detect host OS.
 # I had two options: `uname` and `uname -o`. The first prints `Linux` and `$(MSYSTEM)-some-junk`, and the second prints `GNU/Linux` and `Msys` on Linux and MSYS2 respectively.
 # I don't want to parse MSYSTEM, so I decided to use `uname -o`.
-ifneq ($(findstring Msys,$(call safe_shell_exec,uname -o)),)
+ifneq ($(findstring Msys,$(call safe_shell,uname -o)),)
 HOST_OS := windows
 else
 HOST_OS := linux
@@ -294,6 +294,11 @@ EXT_shared := .dll
 else
 EXT_exe :=
 EXT_shared := .so
+endif
+ifeq ($(HOST_OS),windows)
+HOSTEXT_exe := .exe
+else
+HOSTEXT_exe :=
 endif
 
 # Traditional variables:
@@ -434,7 +439,7 @@ endif
 # On success, returns the same tool, possibly suffixed with a version.
 # Raises an error on failure.
 # Note that we disable the detection when running with `-n`, since the shell function is also disabled in that case.
-override find_versioned_tool = $(if $(findstring n,$(single_letter_makeflags)),$1,$(call find_versioned_tool_low,$1,$(lastword $(sort $(call safe_shell,bash -c 'compgen -c $1' | grep -Ex '$(subst +,\+,$1)(-[0-9]+)?')))))
+override find_versioned_tool = $(if $(findstring n,$(single_letter_makeflags)),$1,$(call find_versioned_tool_low,$1,$(lastword $(sort $(call safe_shell,bash -c 'compgen -c $1' | grep -Po '^$(subst +,\+,$1)(-[0-9]+)?(?=$(HOSTEXT_exe)$$)')))))
 override find_versioned_tool_low = $(if $2,$2,$(error Can't find $1))
 
 ifeq ($(CC),)
@@ -955,7 +960,7 @@ override GENERATE_ON_MODE_CHANGE := $(foreach x,$(GENERATE_ON_MODE_CHANGE),$(if 
 .PHONY: remember-mode
 remember-mode:
 	$(call, Check if the local config already has a mode assignment.)
-	$(if $(filter-out 0,$(call shell_status,grep $(call quote,$(mode_config_prefix)) $(call quote,$(LOCAL_CONFIG)))),\
+	$(if $(filter-out 0,$(call shell_status,grep 2>/dev/null $(call quote,$(mode_config_prefix)) $(call quote,$(LOCAL_CONFIG)))),\
 		$(call, No mode assignment in the local config, create it.)\
 		$(file >>$(LOCAL_CONFIG),)\
 		$(file >>$(LOCAL_CONFIG),$(mode_config_prefix) $(MODE))\
