@@ -92,6 +92,9 @@ override rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(
 # Writes $1 to the output, immediately. Similar to $(info), but not delayed until the end of the recipe, when output grouping is used.
 override log_now = $(if $(filter-out true,$(MAKE_TERMOUT)),$(file >$(MAKE_TERMOUT),$1),$(info $1))
 
+# Like $(filter), but matches any part of a word, rather than the whole word. Doesn't accept `%`s.
+override filter_substr = $(strip $(foreach x,$2,$(foreach y,$1,$(if $(strip $(findstring $y,$x)),$x))))
+
 # $1 is a separator. $2 is a space-separated list of pairs, with $1 between the two elements. $3 is the target string.
 # E.g. `$(call pairwise_subst,>>>,1>>>11 3>>>33 5>>>55,1 2 3 4 5 6)` returns `11 2 33 4 55 6`.
 # You can also use `%` in both pair elements to replace with a pattern.
@@ -303,15 +306,36 @@ export CXXFLAGS :=
 export CPPFLAGS :=
 export LDFLAGS :=
 
+# LDD. Quasi-MSYS2 sets this env variable.
+ifeq ($(TARGET_OS),windows)
+LDD ?= ntldd -R
+else
+LDD ?= ldd
+endif
+
+# Patchelf command, if necessary.
+ifeq ($(TARGET_OS),windows)
+PATCHELF :=
+else
+PATCHELF := patchelf --set-rpath '$$ORIGIN'
+endif
+
 # Windres settings:
 WINDRES := windres
 WINDRES_FLAGS := -O res
 
 # A variable that controls the library loading path.
 ifeq ($(TARGET_OS),windows)
+ifeq ($(HOST_OS),windows)
 LIBRARY_PATH_VAR := PATH
+LIBRARY_PATH_VAR_SEP := :
+else
+LIBRARY_PATH_VAR := WINEPATH
+LIBRARY_PATH_VAR_SEP := ;
+endif
 else
 LIBRARY_PATH_VAR := LD_LIBRARY_PATH
+LIBRARY_PATH_VAR_SEP := :
 endif
 
 # Prevent pkg-config from finding external packages.
@@ -350,9 +374,28 @@ ARCHIVE_DIR := $(proj_dir)/libs
 OBJ_DIR := $(proj_dir)/obj
 # Binaries are written here.
 BIN_DIR := $(proj_dir)/bin
+# Binaries are copied here for distribution.
+DIST_DIR := $(proj_dir)/dist
 
 # Compilation commands are written here.
 COMMANDS := $(proj_dir)/compile_commands.json
+
+# Where in a prefix the shared libraries are located.
+ifeq ($(TARGET_OS),windows)
+SHARED_LIB_DIR_IN_PREFIX := bin
+else
+SHARED_LIB_DIR_IN_PREFIX := lib
+endif
+
+# System libraries matching those patterns are copied, the rest are ignored.
+DIST_COPIED_LIB_PATTERNS := libgcc libstdc++ libc++
+
+# If a system library matches any of `DIST_COPIED_LIB_PATTERNS`, all libraries in the same directory are also considered as matches.
+ifeq ($(TARGET_OS),windows)
+DIST_ALLOW_ENTIRE_DIR_ON_MATCH := y
+else
+DIST_ALLOW_ENTIRE_DIR_ON_MATCH :=
+endif
 
 # Converts a single absolute path from Linux style to host style.
 ifeq ($(HOST_OS),windows)
@@ -361,6 +404,7 @@ else
 override abs_path_to_host = $1
 endif
 
+# This is prepended to the program name in the `run-*` targets. E.g. you can put `gdb` here.
 RUN_WITH :=
 
 
@@ -721,7 +765,7 @@ override proj_recursive_lib_deps_low = $(if $1,$(foreach x,$1,$(__projsetting_li
 # The variable will point to the output directory, plus all libraries used by this project or its dependencies, recursively.
 # We also preserve the original contents of the variable. This is especially important when targeting Windows, since PATH might have system DLLs and/or tools.
 override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(call proj_library_path_value,$1))
-override proj_library_path_value = $(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/lib))$(if $($(LIBRARY_PATH_VAR)),:$($(LIBRARY_PATH_VAR)))
+override proj_library_path_value = $(subst :,$(LIBRARY_PATH_VAR_SEP),$(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)))$(if $($(LIBRARY_PATH_VAR)),:$($(LIBRARY_PATH_VAR))))
 
 # A template for PCH targets.
 # Input variables are:
@@ -846,7 +890,7 @@ run-default: run-$(default_exe_proj)
 run-old-default: run-old-$(default_exe_proj)
 endif
 
-# Various targets.
+# "Build all" target.
 
 .PHONY: all
 all: $(call proj_output_filename,$(proj_list))
@@ -893,7 +937,7 @@ commands:
 	$(file >>$(COMMANDS),])
 	@true
 
-# --- Utility targets ---
+# --- Mode-switching target ---
 
 # Added before the current mode when saving it to the config.
 override mode_config_prefix := MODE :=
@@ -925,6 +969,61 @@ remember-mode:
 		$(call safe_shell_exec,sed -i 's|<MAIN_EXECUTABLE>|$(call proj_output_filename,$(default_exe_proj))|' $(call quote,$x))\
 		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH>|$(call proj_library_path_value,$(default_exe_proj))|' $(call quote,$x))\
 		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH_VAR>|$(LIBRARY_PATH_VAR)|' $(call quote,$x))\
+	)
+	@true
+
+# --- Packaging target ---
+
+.PHONY: dist
+dist: $(call proj_output_filename,$(default_exe_proj))
+	$(call var,__libs_copied :=)
+	$(call, ### Run LDD.)
+	$(call var,__libs := $(call safe_shell,$(call proj_library_path_prefix,$(default_exe_proj)) $(LDD) $(call quote,$<) | sed -E 's/^\s*([^ =]*)( => ([^ ]*))? .0x.*$$/###\1=>\3/g' | grep -Po '(?<=^###).*$$'))
+	$(info [Dist] Parsed LDD output: $(__libs))
+	$(call, ### Remove library names from output, leave only paths.)
+	$(call var,__libs := $(foreach x,$(__libs),$(word 2,$(subst =>, ,$x))))
+	$(call, ### Make paths relative. At least Quasi-MSYS2 win-ldd needs this.)
+	$(call var,__libs := $(subst $(abspath $(proj_dir)),$(proj_dir),$(__libs)))
+	$(info [Dist] Preprocessed LDD output: $(__libs))
+	$(info [Dist] --- Following libraries will be copied:)
+	$(call, ### Filter our own library projects.)
+	$(call var,__libs_proj := $(strip $(foreach x,$(__libs),$(if $(filter $(BIN_DIR)/$(os_mode_string)/%,$x),$x))))
+	$(call var,__libs := $(filter-out $(__libs_proj),$(__libs)))
+	$(if $(__libs_proj),$(info [Dist] Library projects: $(notdir $(__libs_proj))))
+	$(call var,__libs_copied += $(__libs_proj))
+	$(call, ### Filter our own library dependencies.)
+	$(call var,__libs_dep := $(strip $(foreach x,$(__libs),$(if $(filter $(LIB_DIR)/%,$x),$x))))
+	$(call var,__libs := $(filter-out $(__libs_dep),$(__libs)))
+	$(if $(__libs_dep),$(info [Dist] Library dependencies: $(notdir $(__libs_dep))))
+	$(call var,__libs_copied += $(__libs_dep))
+	$(call, ### Filter good system libraries.)
+	$(call var,__libs_sys := $(strip $(foreach x,$(__libs),$(if $(call filter_substr,$(DIST_COPIED_LIB_PATTERNS),$x),$x))))
+	$(call var,__libs := $(filter-out $(__libs_sys),$(__libs)))
+	$(if $(__libs_sys),$(info [Dist] Allowed system libraries: $(notdir $(__libs_sys))))
+	$(call var,__libs_copied += $(__libs_sys))
+	$(call, ### If necessary, add libraries from system directories.)
+	$(call var,__libs_extra_sys := )
+	$(if $(DIST_ALLOW_ENTIRE_DIR_ON_MATCH),\
+		$(call var,__lib_sys_dirs := $(sort $(foreach x,$(__libs_sys),$(dir $x))))\
+		$(info [Dist] Extra allowed system directories: $(__lib_sys_dirs))\
+		$(call var,__libs_extra_sys := $(strip $(foreach x,$(__libs),$(if $(filter $(addsuffix %,$(__lib_sys_dirs)),$x),$x))))\
+		$(call var,__libs := $(filter-out $(__libs_extra_sys),$(__libs)))\
+		$(if $(__libs_extra_sys),$(info [Dist] Extra system libraries: $(notdir $(__libs_extra_sys))))\
+		$(call var,__libs_copied += $(__libs_extra_sys))\
+	)
+	$(call, ### Print rejected libs.)
+	$(info [Dist] --- Following libraries will be ignored:)
+	$(info [Dist] $(notdir $(__libs)))
+	$(call, ### Clean target dir.)
+	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_DIR)))
+	$(call safe_shell_exec,mkdir -p $(call quote,$(DIST_DIR)))
+	$(call, ### Copy the executable.)
+	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(DIST_DIR)))\
+	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(DIST_DIR)/$(notdir $<))))\
+	$(call, ### Copy libraries.)
+	$(foreach x,$(__libs_copied),\
+		$(call safe_shell_exec,cp $(call quote,$x) $(call quote,$(DIST_DIR)))\
+		$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(DIST_DIR)/$(notdir $x))))\
 	)
 	@true
 
