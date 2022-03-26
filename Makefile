@@ -389,6 +389,19 @@ BIN_DIR := $(proj_dir)/bin
 # Binaries are copied here for distribution.
 DIST_DIR := $(proj_dir)/dist
 
+# Those files and directories are copied next to the executable.
+# Since we use `rsync`, a trailing slash has special meaning for directories,
+# it means "contents of directory", rather than the directory itself.
+ASSETS :=
+override default_assets := $(proj_dir)/assets/
+ifneq ($(wildcard $(default_assets)),)
+ASSETS += $(default_assets)
+endif
+# Files matching those patterns are ignored when copying assets.
+# Note that any matching files that were already copied are not deleted (unlike files not existing in the source), since it's easier to do it this way.
+# If you add any new patterns, you need to manually clean copied assets.
+ASSETS_IGNORED_PATTERNS := _*
+
 # Compilation commands are written here.
 COMMANDS := $(proj_dir)/compile_commands.json
 
@@ -831,9 +844,9 @@ override __filename := $(call proj_output_filename,$(__proj))
 # Check that we only depend on shared library projects.
 $(foreach x,$(__projsetting_deps_$(__proj)),$(if $(filter shared,$(__proj_kind_$x)),,$(error Can't depend on `$x`, it's not a library project)))
 
-# A user-friendly link target.
-.PHONY: proj-$(__proj)
-proj-$(__proj): $(__filename)
+# A user-friendly link target. It also updates assets.
+.PHONY: build-$(__proj)
+build-$(__proj): $(__filename) sync-assets
 
 # The actual link target.
 $(__filename): override __proj := $(__proj)
@@ -849,7 +862,7 @@ ifeq ($(__proj_kind_$(__proj)),exe)
 .PHONY: run-$(__proj)
 run-$(__proj): override __proj := $(__proj)
 run-$(__proj): override __filename := $(__filename)
-run-$(__proj): $(__filename)
+run-$(__proj): build-$(__proj)
 	$(call log_now,[Running] $(__proj))
 	@$(run_without_buffering)$(call proj_library_path_prefix,$(__proj)) $(RUN_WITH) $(__filename)
 
@@ -896,8 +909,8 @@ $(foreach x,$(sort $(dir $(targets_needing_dirs))),$(eval $x: ; @mkdir -p $(call
 
 # If we have a default project, add some targets for it.
 ifneq ($(default_exe_proj),)
-.PHONY: proj-default
-proj-default: proj-$(default_exe_proj)
+.PHONY: build-default
+build-default: build-$(default_exe_proj)
 .PHONY: run-default
 run-default: run-$(default_exe_proj)
 .PHONY: run-old-default
@@ -906,8 +919,8 @@ endif
 
 # "Build all" target.
 
-.PHONY: all
-all: $(call proj_output_filename,$(proj_list))
+.PHONY: build-all
+build-all: $(foreach x,$(proj_list),build-$x)
 
 # Cleaning targets. Those ignore libraries, unless specified otherwise.
 
@@ -985,6 +998,20 @@ remember-mode:
 		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH_VAR>|$(LIBRARY_PATH_VAR)|' $(call quote,$x))\
 	)
 	@true
+
+# --- Copy assets target ---
+
+# Uses `rsync` to copy assets to the directory $1.
+# It deletes all mismatching files in the target directory, except for the project outputs, if any.
+# Note that we prefix project outputs with `/`, to indicate that rsync shouldn't match those filenames in subdirectories.
+override copy_assets_to = $(if $(strip $(ASSETS)),$(call safe_shell_exec,rsync -r --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(ASSETS) $(call quote,$1)))
+
+# Copies `ASSETS` to the current bin directory, ignoring any files matching `ASSETS_IGNORED_PATTERNS`.
+.PHONY: sync-assets
+sync-assets:
+	$(call copy_assets_to,$(BIN_DIR)/$(os_mode_string))
+	@true
+
 
 # --- Packaging target ---
 
