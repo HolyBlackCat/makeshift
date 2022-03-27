@@ -386,8 +386,20 @@ ARCHIVE_DIR := $(proj_dir)/libs
 OBJ_DIR := $(proj_dir)/obj
 # Binaries are written here.
 BIN_DIR := $(proj_dir)/bin
-# Binaries are copied here for distribution.
-DIST_DIR := $(proj_dir)/dist
+# Distribution archives are created here.
+DIST_DIR := $(proj_dir)
+# A temporary directory for distribution archives is created here.
+DIST_TMP_DIR := $(proj_dir)/dist
+# The app name used for packaging. `*` is replaced with the name of the first executable project.
+DIST_NAME = *_$(TARGET_OS)_$(MODE)
+
+# The package archive type.
+ifeq ($(TARGET_OS),windows)
+DIST_ARCHIVE_TYPE = zip
+else
+DIST_ARCHIVE_TYPE = tar-zst
+endif
+
 
 # Those files and directories are copied next to the executable.
 # Since we use `rsync`, a trailing slash has special meaning for directories,
@@ -1015,6 +1027,12 @@ sync-assets:
 
 # --- Packaging target ---
 
+# Commands to produce the package archive. $1 is the source directory, $2 is the resulting archive without extension.
+
+# Here we use shell redirection to force-overwrite the file instead of updating it. AND it makes it easier to determine the target path.
+override dist_command-zip = (cd $(call quote,$1) && zip -qr9 - $(call quote,$2)) >$(call quote,$3).zip
+override dist_command-tar-zst = ZSTD_CLEVEL=19 tar --zstd -C $(call quote,$1) -cf $(call quote,$3).tar.zst $(call quote,$2)
+
 .PHONY: dist
 dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call var,__libs_copied :=)
@@ -1058,16 +1076,23 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(info [Dist] --- Following libraries will be ignored:)
 	$(info [Dist] $(notdir $(__libs)))
 	$(call, ### Clean target dir.)
-	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_DIR)))
-	$(call safe_shell_exec,mkdir -p $(call quote,$(DIST_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_TMP_DIR)))
+	$(call var,__target_name := $(subst *,$(default_exe_proj),$(DIST_NAME)))
+	$(call var,__target_dir := $(DIST_TMP_DIR)/$(__target_name))
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__target_dir)))
 	$(call, ### Copy the executable.)
-	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(DIST_DIR)))\
-	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(DIST_DIR)/$(notdir $<))))\
+	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(__target_dir)))\
+	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $<))))\
 	$(call, ### Copy libraries.)
 	$(foreach x,$(__libs_copied),\
-		$(call safe_shell_exec,cp $(call quote,$x) $(call quote,$(DIST_DIR)))\
-		$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(DIST_DIR)/$(notdir $x))))\
+		$(call safe_shell_exec,cp $(call quote,$x) $(call quote,$(__target_dir)))\
+		$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $x))))\
 	)
+	$(call, ### Copy assets.)
+	$(call copy_assets_to,$(__target_dir))
+	$(call, ### Make an archive.)
+	$(if $(dist_command-$(DIST_ARCHIVE_TYPE)),,$(error Unknown archive type: $(DIST_ARCHIVE_TYPE)))
+	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_TYPE),$(DIST_TMP_DIR),$(__target_name),$(DIST_DIR)/$(__target_name)))
 	@true
 
 
