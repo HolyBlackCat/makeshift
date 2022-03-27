@@ -184,7 +184,14 @@ override language_pchflag-cpp := -xc++-header
 language_list += rc
 override language_name-rc := Resource
 override language_pattern-rc := *.rc
-override language_command-rc = $(WINDRES) $(WINDRES_FLAGS) -i $1 -o $2
+override language_command-rc = $(WINDRES) $(WINDRES_FLAGS) $4 -i $1 -o $2
+
+# A helper pseudo-language to compile icons. We want it because we can't set make dependencies for .rc automatically.
+language_list += ico
+override language_name-ico := Icon
+override language_pattern-ico := *.ico
+override language_command-ico = echo $(call quote,$2: $1) >$(call quote,$(2:.o=.d)) && echo $(call quote,MAINICON ICON "$1") >$(call quote,$(2:.o=.rc)) && $(WINDRES) $(WINDRES_FLAGS) $4 -i $(call quote,$(2:.o=.rc)) -o $(call quote,$2)
+override language_outputs_deps-ico := y
 
 
 # --- Define public config functions ---
@@ -414,6 +421,11 @@ endif
 # If you add any new patterns, you need to manually clean copied assets.
 ASSETS_IGNORED_PATTERNS := _*
 
+DISABLED_LANGS :=
+ifneq ($(TARGET_OS),windows)
+DISABLED_LANGS += rc ico
+endif
+
 # Compilation commands are written here.
 COMMANDS := $(proj_dir)/compile_commands.json
 
@@ -535,6 +547,10 @@ override all_libs := $(call archive_to_lib_name,$(lib_ar_list))
 
 # If `ALLOW_PCH` was 0, make it empty.
 override ALLOW_PCH := $(filter-out 0,$(ALLOW_PCH))
+
+# Filter out undesired languages.
+$(if $(filter-out $(language_list),$(DISABLED_LANGS)),$(error Invalid languages in DISABLED_LANGS: $(filter-out $(language_list),$(DISABLED_LANGS))))
+override language_list := $(filter-out $(DISABLED_LANGS),$(language_list))
 
 
 # --- Print header ---
