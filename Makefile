@@ -190,7 +190,7 @@ override language_command-rc = $(WINDRES) $(WINDRES_FLAGS) $4 -i $1 -o $2
 language_list += ico
 override language_name-ico := Icon
 override language_pattern-ico := *.ico
-override language_command-ico = echo $(call quote,$2: $1) >$(call quote,$(2:.o=.d)) && echo $(call quote,MAINICON ICON "$1") >$(call quote,$(2:.o=.rc)) && $(WINDRES) $(WINDRES_FLAGS) $4 -i $(call quote,$(2:.o=.rc)) -o $(call quote,$2)
+override language_command-ico = echo $(call quote,$2: $1) >$(call quote,$(2:.o=.d)) && echo $(call quote,"$1" ICON "$1") >$(call quote,$(2:.o=.rc)) && $(WINDRES) $(WINDRES_FLAGS) $4 -i $(call quote,$(2:.o=.rc)) -o $(call quote,$2)
 override language_outputs_deps-ico := y
 
 
