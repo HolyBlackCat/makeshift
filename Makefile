@@ -9,7 +9,8 @@ $(foreach x,$(filter-out .% MAKE% SHELL CURDIR,$(.VARIABLES)) MAKEINFO,$(if $(fi
 MAKEFLAGS += rR -Otarget
 
 # Automatically parallelize.
-JOBS := $(shell nproc)$(if $(filter-out 0,$(.SHELLSTATUS)),$(info Unable to determine the number of cores, will use one.)1)
+JOBS := $(shell nproc)$(if $(filter-out 0,$(.SHELLSTATUS)),$(info [Warning] Unable to determine the number of cores.)1)
+$(if $(filter 1,$(JOBS)),$(info [Warning] Building in a single thread.))
 MAKEFLAGS += -j$(JOBS)
 
 # Prevent recursive invocations of Make from using our flags.
@@ -396,8 +397,11 @@ BIN_DIR := $(proj_dir)/bin
 DIST_DIR := $(proj_dir)
 # A temporary directory for distribution archives is created here.
 DIST_TMP_DIR := $(proj_dir)/dist
-# The app name used for packaging. `*` is replaced with the name of the first executable project.
-DIST_NAME = *_$(TARGET_OS)_$(MODE)
+
+# The app name used for packaging. `*` = main project name, `^` = build number.
+DIST_NAME = *_$(TARGET_OS)_$(MODE)_^
+# The build number is stored in this file.
+DIST_BUILD_NUMBER_FILE := $(proj_dir)/build_number.txt
 
 # The package archive type.
 ifeq ($(TARGET_OS),windows)
@@ -426,7 +430,7 @@ DISABLED_LANGS += rc ico
 endif
 
 # Compilation commands are written here.
-COMMANDS := $(proj_dir)/compile_commands.json
+COMMANDS_FILE := $(proj_dir)/compile_commands.json
 
 # Where in a prefix the shared libraries are located.
 ifeq ($(TARGET_OS),windows)
@@ -455,6 +459,9 @@ endif
 # This is prepended to the program name in the `run-*` targets. E.g. you can put `gdb` here.
 RUN_WITH :=
 
+# Extra files cleaned by the `clean-for-storage` target. Relative to `$(proj_dir)`.
+CLEAN_FILES_FOR_STORAGE := .cache
+
 
 # --- Load config files ---
 
@@ -470,7 +477,7 @@ LOCAL_CONFIG := $(proj_dir)/local_config.mk
 ifneq ($(wildcard $(LOCAL_CONFIG)),)
 include $(LOCAL_CONFIG)
 else ifneq ($(wildcard $(call generation_source_for_file,$(LOCAL_CONFIG))),)
-$(info Copying `$(call generation_source_for_file,$(LOCAL_CONFIG))` -> `$(LOCAL_CONFIG)`)
+$(info [Config] Copying `$(call generation_source_for_file,$(LOCAL_CONFIG))` -> `$(LOCAL_CONFIG)`)
 $(call safe_shell_exec,cp -f $(call quote,$(call generation_source_for_file,$(LOCAL_CONFIG))) $(call quote,$(LOCAL_CONFIG)))
 include $(LOCAL_CONFIG)
 endif
@@ -845,7 +852,9 @@ $(if $(ALLOW_PCH),$(foreach x,$(proj_list),$(call var,__proj := $x)$(foreach y,$
 # `__proj` - the project name.
 override define codesnippet_object =
 # Output filenames.
-override __outputs := $(call source_files_to_output_list,$(__src),$(__proj))
+override __outputs := $(call source_files_to_main_outputs,$(__src),$(__proj))
+# I wanted to include the dep file in the target, but it causes the makefile itself to be rebuilt. :(
+# override __outputs := $(call source_files_to_output_list,$(__src),$(__proj))
 # The compiled PCH, if any.
 override __pch := $(call pch_files_to_outputs_or_orig,$(call pch_header_for_source,$(__src),$(__proj)),$(__proj))
 
@@ -854,7 +863,7 @@ $(__outputs) &: override __proj := $(__proj)
 $(__outputs) &: override __lang := $(call guess_lang_from_filename,$(__src))
 $(__outputs) &: override __pch := $(__pch)
 
-$(__outputs): $(__src) $(__pch) $(call lib_name_to_log_path,$(all_libs))
+$(__outputs) &: $(__src) $(__pch) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(language_name-$(__lang))] $<)
 	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj))
 
@@ -986,11 +995,11 @@ override doublequote = "$(subst `,\\,$(subst ",\",$(subst \,`,$1)))"
 commands:
 	$(call var,__curdir := $(call doublequote,$(call abs_path_to_host,$(abspath $(proj_dir)))))
 	$(call var,__first := 1)
-	$(file >$(COMMANDS),[)
+	$(file >$(COMMANDS_FILE),[)
 	$(foreach x,$(proj_list),$(foreach y,$(__proj_allsources_$x),\
-		$(file >>$(COMMANDS),   $(if $(__first),$(call var,__first :=) ,$(comma)){"directory": $(__curdir), "file": $(call doublequote,$(abspath $y)), "command":$(call doublequote,$(call language_command-$(call guess_lang_from_filename,$y),$y,,$x))})\
+		$(file >>$(COMMANDS_FILE),   $(if $(__first),$(call var,__first :=) ,$(comma)){"directory": $(__curdir), "file": $(call doublequote,$(abspath $y)), "command":$(call doublequote,$(call language_command-$(call guess_lang_from_filename,$y),$y,,$x))})\
 	))
-	$(file >>$(COMMANDS),])
+	$(file >>$(COMMANDS_FILE),])
 	@true
 
 # --- Mode-switching target ---
@@ -1092,9 +1101,12 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call, ### Print rejected libs.)
 	$(info [Dist] --- Following libraries will be ignored:)
 	$(info [Dist] $(notdir $(__libs)))
+	$(call, ### Read build number.)
+	$(call var,__buildnumber := $(file <$(DIST_BUILD_NUMBER_FILE)))
+	$(if $(__buildnumber),,$(call var,__buildnumber := 0))
 	$(call, ### Clean target dir.)
 	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_TMP_DIR)))
-	$(call var,__target_name := $(subst *,$(default_exe_proj),$(DIST_NAME)))
+	$(call var,__target_name := $(subst *,$(default_exe_proj),$(subst ^,$(__buildnumber),$(DIST_NAME))))
 	$(call var,__target_dir := $(DIST_TMP_DIR)/$(__target_name))
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__target_dir)))
 	$(call, ### Copy the executable.)
@@ -1110,6 +1122,24 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call, ### Make an archive.)
 	$(if $(dist_command-$(DIST_ARCHIVE_TYPE)),,$(error Unknown archive type: $(DIST_ARCHIVE_TYPE)))
 	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_TYPE),$(DIST_TMP_DIR),$(__target_name),$(DIST_DIR)/$(__target_name)))
+	$(info $(lf)[Dist] Produced:  $(__target_name)$(lf))
+	$(call, ### Increment and write build number. Makes more sense to do it now, in case something reads it during build.)
+	$(call var,__buildnumber := $(call safe_shell,echo $(call quote,$(__buildnumber)+1) | bc))
+	$(file >$(DIST_BUILD_NUMBER_FILE),$(__buildnumber))
+	@true
+
+
+# --- 'Clean for storage' target ---
+
+# Cleans the project for long-term storage.
+.PHONY: clean-for-storage
+clean-for-storage:
+	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(OBJ_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_TMP_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(COMMANDS_FILE)))
+	$(foreach x,$(CLEAN_FILES_FOR_STORAGE),$(call safe_shell_exec,rm -rf $(call quote,$(proj_dir)/$x)))
 	@true
 
 
