@@ -190,8 +190,7 @@ override language_command-rc = $(WINDRES) $(WINDRES_FLAGS) $4 -i $1 -o $2
 language_list += ico
 override language_name-ico := Icon
 override language_pattern-ico := *.ico
-override language_command-ico = echo $(call quote,$2: $1) >$(call quote,$(2:.o=.d)) && echo $(call quote,"$1" ICON "$1") >$(call quote,$(2:.o=.rc)) && $(WINDRES) $(WINDRES_FLAGS) $4 -i $(call quote,$(2:.o=.rc)) -o $(call quote,$2)
-override language_outputs_deps-ico := y
+override language_command-ico = echo $(call quote,"$1" ICON "$1") >$(call quote,$(2:.o=.rc)) && $(WINDRES) $(WINDRES_FLAGS) $4 -i $(call quote,$(2:.o=.rc)) -o $(call quote,$2)
 
 
 # --- Define public config functions ---
@@ -858,6 +857,8 @@ $(__outputs) &: override __pch := $(__pch)
 $(__outputs): $(__src) $(__pch) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(language_name-$(__lang))] $<)
 	@$(call language_command-$(__lang),$<,$(firstword $(__outputs)),$(__proj))
+
+-include $(call source_files_to_dep_outputs,$(__src),$(__proj))
 endef
 
 # Generate object file targets.
