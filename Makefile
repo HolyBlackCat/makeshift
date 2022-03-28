@@ -234,11 +234,10 @@ override Project = \
 	$(call var,proj_list += $2)\
 	$(call var,__proj_kind_$(strip $2) := $(strip $1))\
 
-override proj_setting_names := kind sources source_dirs cflags cxxflags ldflags common_flags flags_func pch deps libs bad_lib_flags lang
+override proj_setting_names := sources source_dirs cflags cxxflags ldflags common_flags flags_func pch deps libs bad_lib_flags lang
 
 # On success, assigns $2 to variable `__projsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
-# * kind - either `exe` or `shared`.
 # * sources - individual source files.
 # * source_dirs - directories to search for source files. The result is combined with `sources`.
 # * {c,cxx}flags - compiler flags for C and CXX respectively.
@@ -257,18 +256,15 @@ override ProjectSetting = \
 
 override mode_list :=
 
-# Creates a new build mode $1. Use `ModeSetting` to configure it.
-override Mode = \
+# Creates a new build mode $1. You can use `Mode` to configure it, or directly check `MODE` and modify flags accordingly.
+# Usage: `$(call NewMode,release)`
+override NewMode = \
 	$(if $(filter-out 1,$(words $1)),$(error Mode name must be a single word))\
 	$(call var,mode_list += $1)
 
-# Sets a mode-specific variable $1 to value $2.
-# Any variable can be assigned this way, so the name is not checked.
-# You can mention the target variable in $2 to append to its old value, using the usual syntax. Dollars appear to work in the variables, assuming you escape them using $$.
-override ModeSetting = \
-	$(if $(filter 0,$(words $(mode_list))),$(error Must specify mode settings after a mode))\
-	$(if $(filter-out 1,$(words $1)),$(error Mode variable name must be a single word))\
-	$(call var,__modevar_$(lastword $(mode_list))_$(strip $1) := $2)
+# Usage: `$(Mode)VAR := ...` (or `+=`, or any other line).
+# The lack of space after `$(Mode)` is critical.
+override Mode = $(if $(strip $(filter-out $(lastword $(mode_list)),$(MODE))),override __unused =)
 
 
 # --- Set default values before loading configs ---
@@ -465,10 +461,6 @@ CLEAN_FILES_FOR_STORAGE := .cache
 
 # --- Load config files ---
 
-# Project config.
-P := $(proj_dir)/project.mk
-include $P
-
 # For each file in $1, modifies the name to include `.default` before the extension, e.g. `foo.json` -> `foo.default.json`.
 override generation_source_for_file = $(foreach x,$1,$(basename $x).default$(suffix $x))
 
@@ -481,6 +473,10 @@ $(info [Config] Copying `$(call generation_source_for_file,$(LOCAL_CONFIG))` -> 
 $(call safe_shell_exec,cp -f $(call quote,$(call generation_source_for_file,$(LOCAL_CONFIG))) $(call quote,$(LOCAL_CONFIG)))
 include $(LOCAL_CONFIG)
 endif
+
+# Project config.
+P := $(proj_dir)/project.mk
+include $P
 
 
 # --- Fall back to default compiler if not specified ---
@@ -1198,7 +1194,7 @@ override buildsystem-cmake = \
 		>>$(call quote,$(__log_path))\
 	)\
 	$(call log_now,[Library] >>> Building...)\
-	$(call safe_shell_exec,cmake --build $(call quote,$(__build_dir)) >>$(call quote,$(__log_path)) -j$(JOBS))\
+	$(call safe_shell_exec,cmake --build $(call quote,$(__build_dir)) 2>&1 >>$(call quote,$(__log_path)) -j$(JOBS))\
 	$(call log_now,[Library] >>> Installing...)\
 	$(call, Note that we must specify the install path again, see the use of CMAKE_STAGING_PREFIX above.)\
 	$(call safe_shell_exec,cmake --install $(call quote,$(__build_dir)) --prefix $(call quote,$(__install_dir)) >>$(call quote,$(__log_path)))\
@@ -1213,7 +1209,7 @@ override buildsystem-configure_make = \
 	$(call, Note the jank `cd`. It seems to allow out-of-tree builds.)\
 	$(call safe_shell_exec,(cd $(call quote,$(__build_dir)) && $(__bs_shell_vars) $(call quote,$(abspath $(__source_dir)/configure)) --prefix=$(call quote,$(abspath $(__install_dir)))) >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Building...)\
-	$(call safe_shell_exec,$(__bs_shell_vars) make -C $(call quote,$(__build_dir)) -j$(JOBS) -Otarget >>$(call quote,$(__log_path)))\
+	$(call safe_shell_exec,$(__bs_shell_vars) make -C $(call quote,$(__build_dir)) -j$(JOBS) -Otarget 2>&1 >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Installing...)\
 	$(call, Note DESTDIR. We don't want to install to prefix yet, since we've copied our dependencies there.)\
 	$(call, Note abspath for DESTDIR. You get an error otherwise, explicitly asking for an absolute one. Tested on libvorbis.)\
