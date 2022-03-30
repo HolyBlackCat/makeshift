@@ -159,6 +159,7 @@ override archive_extract-ZIP = $(call safe_shell_exec,unzip $(call quote,$1) -d 
 # We give preference to CMake, because it's easier to deal with.
 # Downsides:
 # * zlib - CMake support is jank. On MinGW it produces `libzlib.dll`, while pkg-config says to link `-lz`.
+# * vorbis - On Windows, tries to link `ogg.dll` instead of `libogg.dll` for some reason. Use `configure_make` for it, and for ogg for a good measure.
 buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
 
 
@@ -318,8 +319,8 @@ endif
 ifeq ($(TARGET_OS),windows)
 IS_SHARED_LIB_FILENAME = $(filter %.dll,$1)
 else
-# Here we only accept `foo.so.N`, since apparently that's what we link against.
-IS_SHARED_LIB_FILENAME = $(and $(findstring .so.,$1),$(filter 1,$(words $(subst ., ,$(lastword $(subst .so., ,$1))))))
+# Normally we only link against `foo.so.X`, but vorbis links against `foo.so.X.Y.Z` instead, so we accept all of them.
+IS_SHARED_LIB_FILENAME = $(or $(filter %.so,$1),$(findstring .so.,$1))
 endif
 
 # Where in a prefix the shared libraries are located.
@@ -1063,7 +1064,7 @@ remember-mode:
 override copy_assets_and_libs_to = \
 	$(call var,__lib_deps := $(strip $(foreach x,$(foreach x,$(sort $(foreach x,$(proj_list),$(__projsetting_libs_$x))),$(wildcard $(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)/*)),$(if $(call IS_SHARED_LIB_FILENAME,$x),$x))))\
 	$(call safe_shell_exec,rsync -Lr --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(foreach x,$(__lib_deps),--exclude $(call quote,/$(notdir $x))) $(ASSETS) $(call quote,$1))\
-	$(if $2,$(foreach x,$(__lib_deps),$(if $(strip $(call safe_shell,cp -uv $(call quote,$x) $(call quote,$1))),$(info [Copy library] $(notdir $x))$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$1/$(notdir $x)))))))
+	$(if $2,$(foreach x,$(__lib_deps),$(if $(strip $(call safe_shell,cp -duv $(call quote,$x) $(call quote,$1))),$(info [Copy library] $(notdir $x))$(if $(PATCHELF),$(if $(filter 0,$(call shell_status,test ! -L $(call quote,$1/$(notdir $x)))),$(call safe_shell_exec,$(PATCHELF) $(call quote,$1/$(notdir $x))))))))
 
 # Copies libraries and `ASSETS` to the current bin directory, ignoring any files matching `ASSETS_IGNORED_PATTERNS`.
 .PHONY: sync-libs-and-assets
