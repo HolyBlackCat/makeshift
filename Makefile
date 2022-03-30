@@ -373,7 +373,7 @@ override PKG_CONFIG_LIBDIR :=
 export PKG_CONFIG_LIBDIR
 
 # A list of those variables, and a string suitable to set them in a shell.
-override exported_env_vars_list := CC CXX CPP LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+override exported_env_vars_list := CC CXX CPP LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
 override env_vars_for_shell = $(foreach x,$(exported_env_vars_list),$x=$(call quote,$($x)))
 
 MODE :=# Build mode.
