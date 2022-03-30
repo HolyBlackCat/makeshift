@@ -262,8 +262,9 @@ override NewMode = \
 	$(if $(filter-out 1,$(words $1)),$(error Mode name must be a single word))\
 	$(call var,mode_list += $1)
 
+# Runs the rest of the line immediately, if the mode matches.
 # Usage: `$(Mode)VAR := ...` (or `+=`, or any other line).
-# The lack of space after `$(Mode)` is critical.
+# The lack of space after `$(Mode)` is critical. Otherwise you get an error, regardless of the current mode.
 override Mode = $(if $(strip $(filter-out $(lastword $(mode_list)),$(MODE))),override __unused =)
 
 
@@ -620,47 +621,51 @@ clean-lib-$(__lib_name)-this-os-this-mode:
 	@true
 
 # Actually builds the library. Has a pretty alias, defined above.
+# One big `strip` around the target makes sure two of them can't run in parallel, I hope.
+# Normally that doesn't happen, but once I've seen an error that could only be caused by it.
 $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_deps_$(__lib_name)))
-	$(call, Firstly, detect archive type, and stop if unknown, to avoid creating junk.)
-	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))
-	$(if $(__ar_type),,$(error Don't know this archive extension))
-	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/source)
-	$(call, We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)
-	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/temp_source)
-	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)
-	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))
-	$(call log_now,[Library] $(__lib_name))
-	$(call, Remove old files.)
-	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))
-	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))
-	$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir)))
-	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))
-	$(call safe_shell_exec,rm -f $(call quote,$(__log_path_final)))
-	$(call safe_shell_exec,rm -f $(call quote,$(__log_path)))
-	$(call, Make some directories.)
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__tmp_source_dir)))
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))
-	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))
-	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)
-	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))
-	$(call, Move the most-nested source dir to the proper location, then remove the remaining junk.)
-	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))
-	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))
-	$(call, Detect build system.)
+	$(strip\
+	$(call, Firstly, detect archive type, and stop if unknown, to avoid creating junk.)\
+	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))\
+	$(if $(__ar_type),,$(error Don't know this archive extension))\
+	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/source)\
+	$(call, We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)\
+	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/temp_source)\
+	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)\
+	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))\
+	$(call log_now,[Library] $(__lib_name))\
+	$(call, Remove old files.)\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir)))\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))\
+	$(call safe_shell_exec,rm -f $(call quote,$(__log_path_final)))\
+	$(call safe_shell_exec,rm -f $(call quote,$(__log_path)))\
+	$(call, Make some directories.)\
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__tmp_source_dir)))\
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))\
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))\
+	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))\
+	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)\
+	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))\
+	$(call, Move the most-nested source dir to the proper location, then remove the remaining junk.)\
+	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))\
+	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
+	$(call, Detect build system.)\
 	$(call var,__build_sys := $(strip $(if $(__libsetting_build_system_$(__lib_name)),\
 		$(__libsetting_build_system_$(__lib_name)),\
 		$(call id_build_system,$(__source_dir)))\
-	))
-	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))
-	$(call, Run the build system.)
-	$(buildsystem-$(__build_sys))
-	$(call, Fix some crap.)
-	$(call, * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)
-	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)
-	$(call, On success, move the log to the right location.)
-	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))
-	$(call log_now,[Library] >>> Done)
+	))\
+	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))\
+	$(call, Run the build system.)\
+	$(buildsystem-$(__build_sys))\
+	$(call, Fix some crap.)\
+	$(call, * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)\
+	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)\
+	$(call, On success, move the log to the right location.)\
+	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))\
+	$(call log_now,[Library] >>> Done)\
+	)
 	@true
 endef
 
@@ -802,7 +807,7 @@ override pch_files_to_outputs_or_orig = $(if $(ALLOW_PCH),$(call pch_files_to_ou
 # Given a source file $1 and a project $2, returns the PCH header for it, if any.
 override pch_header_for_source = $(if $(language_pchflag-$(call guess_lang_from_filename_opt,$1)),$(call find_first_match,$(pch_rule_sep),;,$(subst *,%,$(__projsetting_pch_$2)),$1))
 # Given a source file $1 and a project $2, returns the PCH flag for it, if any.
-override pch_flag_for_source = $(call pch_flag_for_source_low,$(call pch_header_for_source,$1,$2))
+override pch_flag_for_source = $(call pch_flag_for_source_low,$(call pch_files_to_outputs_or_orig,$(call pch_header_for_source,$1,$2),$2))
 override pch_flag_for_source_low = $(if $1,-include$(patsubst %.gch,%,$1))
 
 # Given source filenames $1 and a project $2, returns all outputs for them. Might return more elements than in $1, but never less.
@@ -837,6 +842,8 @@ $(__output): override __lang := $(__projsetting_lang_$(__proj))
 $(__output): $(__src) $(call lib_name_to_log_path,$(all_libs))
 	$(call log_now,[$(language_name-$(__lang)) PCH] $<)
 	@$(call language_command-$(__lang),$<,$@,$(__proj),$(language_pchflag-$(__projsetting_lang_$(__proj))))
+
+-include $(__output:.gch=.d)
 endef
 
 # Generate PCH targets.
@@ -993,7 +1000,7 @@ commands:
 	$(call var,__first := 1)
 	$(file >$(COMMANDS_FILE),[)
 	$(foreach x,$(proj_list),$(foreach y,$(__proj_allsources_$x),\
-		$(file >>$(COMMANDS_FILE),   $(if $(__first),$(call var,__first :=) ,$(comma)){"directory": $(__curdir), "file": $(call doublequote,$(abspath $y)), "command":$(call doublequote,$(call language_command-$(call guess_lang_from_filename,$y),$y,,$x))})\
+		$(file >>$(COMMANDS_FILE),   $(if $(__first),$(call var,__first :=) ,$(comma)){"directory": $(__curdir), "file": $(call doublequote,$(abspath $y)), "command": $(call doublequote,$(call language_command-$(call guess_lang_from_filename,$y),$y,,$x))})\
 	))
 	$(file >>$(COMMANDS_FILE),])
 	@true
@@ -1105,6 +1112,8 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call var,__target_name := $(subst *,$(default_exe_proj),$(subst ^,$(__buildnumber),$(DIST_NAME))))
 	$(call var,__target_dir := $(DIST_TMP_DIR)/$(__target_name))
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__target_dir)))
+	$(call, ### Copy assets. This must be first, because the command will erase some other files from target directory.)
+	$(call copy_assets_to,$(__target_dir))
 	$(call, ### Copy the executable.)
 	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(__target_dir)))\
 	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $<))))\
@@ -1113,8 +1122,6 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 		$(call safe_shell_exec,cp $(call quote,$x) $(call quote,$(__target_dir)))\
 		$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $x))))\
 	)
-	$(call, ### Copy assets.)
-	$(call copy_assets_to,$(__target_dir))
 	$(call, ### Make an archive.)
 	$(if $(dist_command-$(DIST_ARCHIVE_TYPE)),,$(error Unknown archive type: $(DIST_ARCHIVE_TYPE)))
 	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_TYPE),$(DIST_TMP_DIR),$(__target_name),$(DIST_DIR)/$(__target_name)))
