@@ -156,10 +156,11 @@ override archive_extract-ZIP = $(call safe_shell_exec,unzip $(call quote,$1) -d 
 # Modify this variable to tweak build system detection.
 # Order matters, the first match is used.
 # A space separated list of `<filename>-><buildsystem>`.
-# We give preference to `configure_make` for at least following reasons:
+# We give preference to CMake, because it's easier to deal with.
+# But note that:
 # * Some libraries don't build shared libraries by default with CMake, at least: freetype, ogg, vorbis.
 # * CMake support in zlib is jank. On MinGW it produces `libzlib.dll`, while pkg-config says to link `-lz`.
-buildsystem_detection := configure->configure_make CMakeLists.txt->cmake
+buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
 
 
 # --- Language definitions ---
