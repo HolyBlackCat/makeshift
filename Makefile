@@ -76,8 +76,13 @@ endif
 # Same as `safe_shell`, but discards the output and expands to nothing.
 override safe_shell_exec = $(call,$(call safe_shell,$1))
 
+# Same as the built-in `wildcard`, but without the dumb caching issues and with more sanity checks.
+# Make tends to cache the results of `wildcard`, and doesn't invalidate them when it should.
+override safe_wildcard = $(foreach x,$(call safe_shell,echo $1),$(if $(filter 0,$(call shell_status,test -e $(call quote,$x))),$x))
+
 # $1 is a directory. If it has a single subdirectory and nothing more, adds it to the path, recursively.
-override most_nested = $(call most_nested_low,$1,$(filter-out $(most_nested_ignored_files),$(wildcard $1/*)))
+# I'm not sure why `safe_wildcard` is needed here. The built-in `wildcard` sometimes likes to return stale results from previous parameters, weird.
+override most_nested = $(call most_nested_low,$1,$(filter-out $(most_nested_ignored_files),$(call safe_wildcard,$1/*)))
 override most_nested_low = $(if $(filter 1,$(words $2)),$(call most_nested,$2),$1)
 # `most_nested` ignores those filenames.
 override most_nested_ignored_files = pax_global_header
@@ -636,51 +641,49 @@ clean-lib-$(__lib_name)-this-os-this-mode:
 # One big `strip` around the target makes sure two of them can't run in parallel, I hope.
 # Normally that doesn't happen, but once I've seen an error that could only be caused by it.
 $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_deps_$(__lib_name)))
-	$(strip\
-	$(call, ### Firstly, detect archive type, and stop if unknown, to avoid creating junk.)\
-	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))\
-	$(if $(__ar_type),,$(error Don't know this archive extension))\
-	$(call, ### Set variables. Note that the source dir is common for all build modes, to save space.)\
-	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/source)\
-	$(call, ### We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)\
-	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/temp_source)\
-	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)\
-	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))\
-	$(call log_now,[Library] $(__lib_name))\
-	$(call, ### Remove old files.)\
-	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))\
-	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
-	$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir)))\
-	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))\
-	$(call safe_shell_exec,rm -f $(call quote,$(__log_path_final)))\
-	$(call safe_shell_exec,rm -f $(call quote,$(__log_path)))\
-	$(call, ### Make some directories.)\
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__tmp_source_dir)))\
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))\
-	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))\
-	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))\
-	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)\
-	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))\
-	$(call, ### Move the most-nested source dir to the proper location, then remove the remaining junk.)\
-	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))\
-	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
-	$(call, ### Detect build system.)\
+	$(call, ### Firstly, detect archive type, and stop if unknown, to avoid creating junk.)
+	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))
+	$(if $(__ar_type),,$(error Don't know this archive extension))
+	$(call, ### Set variables. Note that the source dir is common for all build modes, to save space.)
+	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/source)
+	$(call, ### We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)
+	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/temp_source)
+	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)
+	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))
+	$(call log_now,[Library] $(__lib_name))
+	$(call, ### Remove old files.)
+	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))
+	$(call safe_shell_exec,rm -f $(call quote,$(__log_path_final)))
+	$(call safe_shell_exec,rm -f $(call quote,$(__log_path)))
+	$(call, ### Make some directories.)
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__tmp_source_dir)))
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))
+	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))
+	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))
+	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)
+	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))
+	$(call, ### Move the most-nested source dir to the proper location, then remove the remaining junk.)
+	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))
+	$(call, ### Detect build system.)
 	$(call var,__build_sys := $(strip $(if $(__libsetting_build_system_$(__lib_name)),\
 		$(__libsetting_build_system_$(__lib_name)),\
 		$(call id_build_system,$(__source_dir)))\
-	))\
-	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))\
-	$(call, ### Run the build system.)\
-	$(buildsystem-$(__build_sys))\
-	$(call, ### Fix some crap.)\
-	$(call, ### * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)\
-	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)\
-	$(call, ### Delete the build tree, if needed.)\
-	$(if $(KEEP_BUILD_TREES),,$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir))))\
-	$(call, ### On success, move the log to the right location.)\
-	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))\
-	$(call log_now,[Library] >>> Done)\
-	)
+	))
+	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))
+	$(call, ### Run the build system.)
+	$(buildsystem-$(__build_sys))
+	$(call, ### Fix some crap.)
+	$(call, ### * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)
+	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)
+	$(call, ### Delete the build tree, if needed.)
+	$(if $(KEEP_BUILD_TREES),,$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir))))
+	$(call, ### On success, move the log to the right location.)
+	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))
+	$(call log_now,[Library] >>> Done)
 	@true
 endef
 
