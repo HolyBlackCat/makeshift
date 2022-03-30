@@ -992,6 +992,12 @@ clean-this-os-including-libs: clean-this-os clean-libs-this-os
 .PHONY: clean-this-os-this-mode-including-libs
 clean-this-os-this-mode-including-libs: clean-this-os-this-mode clean-libs-this-os-this-mode
 
+# Destroy all compiled PCHs.
+.PHONY: clean-pch
+clean-pch:
+	$(call safe_shell_exec,find $(call quote,$(OBJ_DIR)) -name '*.gch' -type f -delete)
+	@true
+
 # `compile_commands.json` target.
 
 # Double-quotes a string.
