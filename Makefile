@@ -406,6 +406,12 @@ DIST_TMP_DIR := $(proj_dir)/dist
 # The build trees occupy extra space.
 KEEP_BUILD_TREES := 0
 
+# List flags to filter them out from pkg-config output.
+# Same format as `bad_lib_flags` project property: use `%` to match parts of flags;
+# use `flag>>>replacement` to replace the flag instead of removing it (can use `%` in replacement too).
+# `-mwindows -Wl,-rpath%` are here because SDL2 likes to use them.
+BAD_LIB_FLAGS := -mwindows -Wl,-rpath%
+
 # The app name used for packaging. `*` = main project name, `^` = build number.
 DIST_NAME = *_$(TARGET_OS)_$(MODE)_^
 # The build number is stored in this file.
@@ -799,7 +805,7 @@ override pch_rule_sep := ->
 
 # Given project $2 and flag type $1 (cflags or ldflags), returns the flags.
 # The flags are filtered according to the project settings, and also are cached.
-override proj_filtered_flags = $(call pairwise_subst,$(bad_lib_flags_sep),$(__projsetting_bad_lib_flags_$2),$(call lib_cache_flags,lib_$(strip $1),$(__projsetting_libs_$2)))
+override proj_filtered_flags = $(call pairwise_subst,$(bad_lib_flags_sep),$(BAD_LIB_FLAGS) $(__projsetting_bad_lib_flags_$2),$(call lib_cache_flags,lib_$(strip $1),$(__projsetting_libs_$2)))
 
 # Given source filenames $1 and a project $2, returns the resulting dependency output files, if any. Some languages don't generate them.
 override source_files_to_dep_outputs = $(strip $(foreach x,$1,$(if $(language_outputs_deps-$(call guess_lang_from_filename,$x)),$(OBJ_DIR)/$(os_mode_string)/$2/$x.d)))
