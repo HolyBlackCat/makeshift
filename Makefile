@@ -390,9 +390,9 @@ COMMON_FLAGS_IMPLICIT += -fdiagnostics-color=always
 endif
 
 # Libraries are built here.
-LIB_DIR := $(proj_dir)/built_libs
+LIB_DIR := $(proj_dir)/deps
 # Library archives are found here.
-ARCHIVE_DIR := $(proj_dir)/libs
+ARCHIVE_DIR := $(proj_dir)/deps_archives
 # Object files are written here.
 OBJ_DIR := $(proj_dir)/obj
 # Binaries are written here.
@@ -401,6 +401,10 @@ BIN_DIR := $(proj_dir)/bin
 DIST_DIR := $(proj_dir)
 # A temporary directory for distribution archives is created here.
 DIST_TMP_DIR := $(proj_dir)/dist
+
+# If true, don't delete build trees when building libraries.
+# The build trees occupy extra space.
+KEEP_BUILD_TREES := 0
 
 # The app name used for packaging. `*` = main project name, `^` = build number.
 DIST_NAME = *_$(TARGET_OS)_$(MODE)_^
@@ -550,6 +554,9 @@ override all_libs := $(call archive_to_lib_name,$(lib_ar_list))
 # If `ALLOW_PCH` was 0, make it empty.
 override ALLOW_PCH := $(filter-out 0,$(ALLOW_PCH))
 
+# If `KEEP_BUILD_TREES` was 0, make it empty.
+override KEEP_BUILD_TREES := $(filter-out 0,$(KEEP_BUILD_TREES))
+
 # Filter out undesired languages.
 $(if $(filter-out $(language_list),$(DISABLED_LANGS)),$(error Invalid languages in DISABLED_LANGS: $(filter-out $(language_list),$(DISABLED_LANGS))))
 override language_list := $(filter-out $(DISABLED_LANGS),$(language_list))
@@ -624,44 +631,47 @@ clean-lib-$(__lib_name)-this-os-this-mode:
 # Normally that doesn't happen, but once I've seen an error that could only be caused by it.
 $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_deps_$(__lib_name)))
 	$(strip\
-	$(call, Firstly, detect archive type, and stop if unknown, to avoid creating junk.)\
+	$(call, ### Firstly, detect archive type, and stop if unknown, to avoid creating junk.)\
 	$(call var,__ar_type := $(call archive_classify_filename,$(__ar_name)))\
 	$(if $(__ar_type),,$(error Don't know this archive extension))\
-	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/source)\
-	$(call, We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)\
-	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/temp_source)\
+	$(call, ### Set variables. Note that the source dir is common for all build modes, to save space.)\
+	$(call var,__source_dir := $(LIB_DIR)/$(__lib_name)/source)\
+	$(call, ### We first extract the archive to this dir, then move the most nested subdir to __source_dir and delete this one.)\
+	$(call var,__tmp_source_dir := $(LIB_DIR)/$(__lib_name)/temp_source)\
 	$(call var,__build_dir := $(LIB_DIR)/$(__lib_name)/$(os_mode_string)/build)\
 	$(call var,__install_dir := $(call lib_name_to_prefix,$(__lib_name)))\
 	$(call log_now,[Library] $(__lib_name))\
-	$(call, Remove old files.)\
+	$(call, ### Remove old files.)\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir)))\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))\
 	$(call safe_shell_exec,rm -f $(call quote,$(__log_path_final)))\
 	$(call safe_shell_exec,rm -f $(call quote,$(__log_path)))\
-	$(call, Make some directories.)\
+	$(call, ### Make some directories.)\
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__tmp_source_dir)))\
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__build_dir)))\
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__install_dir)))\
 	$(call safe_shell_exec,mkdir -p $(call quote,$(dir $(__log_path_final))))\
 	$(call log_now,[Library] >>> Extracting $(__ar_type) archive...)\
 	$(call archive_extract-$(__ar_type),$(__ar_path),$(__tmp_source_dir))\
-	$(call, Move the most-nested source dir to the proper location, then remove the remaining junk.)\
+	$(call, ### Move the most-nested source dir to the proper location, then remove the remaining junk.)\
 	$(call safe_shell_exec,mv $(call quote,$(call most_nested,$(__tmp_source_dir))) $(call quote,$(__source_dir)))\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__tmp_source_dir)))\
-	$(call, Detect build system.)\
+	$(call, ### Detect build system.)\
 	$(call var,__build_sys := $(strip $(if $(__libsetting_build_system_$(__lib_name)),\
 		$(__libsetting_build_system_$(__lib_name)),\
 		$(call id_build_system,$(__source_dir)))\
 	))\
 	$(if $(filter undefined,$(origin buildsystem-$(__build_sys))),$(error Don't know this build system: `$(__build_sys)`))\
-	$(call, Run the build system.)\
+	$(call, ### Run the build system.)\
 	$(buildsystem-$(__build_sys))\
-	$(call, Fix some crap.)\
-	$(call, * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)\
+	$(call, ### Fix some crap.)\
+	$(call, ### * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)\
 	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)\
-	$(call, On success, move the log to the right location.)\
+	$(call, ### Delete the build tree, if needed.)\
+	$(if $(KEEP_BUILD_TREES),,$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir))))\
+	$(call, ### On success, move the log to the right location.)\
 	$(call safe_shell_exec,mv $(call quote,$(__log_path)) $(call quote,$(__log_path_final)))\
 	$(call log_now,[Library] >>> Done)\
 	)
