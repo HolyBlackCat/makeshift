@@ -305,6 +305,22 @@ else
 HOSTEXT_exe :=
 endif
 
+# Check if the filename looks like a shared library.
+# This is used together with `SHARED_LIB_DIR_IN_PREFIX` to find library files in compiled libraries. In a pinch, you could always return true.
+ifeq ($(TARGET_OS),windows)
+IS_SHARED_LIB_FILENAME = $(filter %.dll,$1)
+else
+# Here we only accept `foo.so.N`, since apparently that's what we link against.
+IS_SHARED_LIB_FILENAME = $(and $(findstring .so.,$1),$(filter 1,$(words $(subst ., ,$(lastword $(subst .so., ,$1))))))
+endif
+
+# Where in a prefix the shared libraries are located.
+ifeq ($(TARGET_OS),windows)
+SHARED_LIB_DIR_IN_PREFIX := bin
+else
+SHARED_LIB_DIR_IN_PREFIX := lib
+endif
+
 # Traditional variables:
 export CC ?=
 export CXX ?=
@@ -332,27 +348,15 @@ endif
 # Patchelf command, if necessary.
 ifeq ($(TARGET_OS),windows)
 PATCHELF :=
+LDFLAGS_RPATH :=
 else
 PATCHELF := patchelf --set-rpath '$$ORIGIN'
+LDFLAGS_RPATH := -Wl,-rpath='$$ORIGIN'
 endif
 
 # Windres settings:
 WINDRES := windres
 WINDRES_FLAGS := -O res
-
-# A variable that controls the library loading path.
-ifeq ($(TARGET_OS),windows)
-ifeq ($(HOST_OS),windows)
-LIBRARY_PATH_VAR := PATH
-LIBRARY_PATH_VAR_SEP := :
-else
-LIBRARY_PATH_VAR := WINEPATH
-LIBRARY_PATH_VAR_SEP := ;
-endif
-else
-LIBRARY_PATH_VAR := LD_LIBRARY_PATH
-LIBRARY_PATH_VAR_SEP := :
-endif
 
 # Prevent pkg-config from finding external packages.
 override PKG_CONFIG_PATH :=
@@ -417,6 +421,7 @@ ifneq ($(wildcard $(default_assets)),)
 ASSETS += $(default_assets)
 endif
 # Files matching those patterns are ignored when copying assets.
+# Note that those patterns are also respected when copying library dependencies, since it's easier to do it this way.
 # Note that any matching files that were already copied are not deleted (unlike files not existing in the source), since it's easier to do it this way.
 # If you add any new patterns, you need to manually clean copied assets.
 ASSETS_IGNORED_PATTERNS := _*
@@ -428,13 +433,6 @@ endif
 
 # Compilation commands are written here.
 COMMANDS_FILE := $(proj_dir)/compile_commands.json
-
-# Where in a prefix the shared libraries are located.
-ifeq ($(TARGET_OS),windows)
-SHARED_LIB_DIR_IN_PREFIX := bin
-else
-SHARED_LIB_DIR_IN_PREFIX := lib
-endif
 
 # System libraries matching those patterns are copied, the rest are ignored.
 DIST_COPIED_LIB_PATTERNS := libgcc libstdc++ libc++
@@ -530,14 +528,12 @@ $(foreach x,$(filter __modevar_$(MODE)_%,$(.VARIABLES)),$(call var,$(patsubst __
 # Note that we can't add the flags to CC, CXX.
 # It initially looked like we can, if we then do `-DCMAKE_C_COMPILER=$(subst $(space,;,$(CC))`, but CMake seems to ignore those extra flags. What a shame.
 # Note that we can't use `+=` here, because if user overrides those variables, they may not be `:=`, and we then undefine `COMMON_FLAGS`.
-override CFLAGS   := $(COMMON_FLAGS) $(CFLAGS)
-override CFLAGS   := $(COMMON_FLAGS_IMPLICIT) $(CFLAGS)
-override CXXFLAGS := $(COMMON_FLAGS) $(CXXFLAGS)
-override CXXFLAGS := $(COMMON_FLAGS_IMPLICIT) $(CXXFLAGS)
-override LDFLAGS  := $(COMMON_FLAGS) $(LDFLAGS)
-override LDFLAGS  := $(COMMON_FLAGS_IMPLICIT) $(LDFLAGS)
+override CFLAGS   := $(COMMON_FLAGS_IMPLICIT) $(COMMON_FLAGS) $(CFLAGS)
+override CXXFLAGS := $(COMMON_FLAGS_IMPLICIT) $(COMMON_FLAGS) $(CXXFLAGS)
+override LDFLAGS  := $(COMMON_FLAGS_IMPLICIT) $(COMMON_FLAGS) $(LDFLAGS_RPATH) $(LDFLAGS)
 override undefine COMMON_FLAGS
 override undefine COMMON_FLAGS_IMPLICIT
+override undefine LDFLAGS_RPATH
 
 override LDFLAGS := $(if $(LINKER),-fuse-ld=$(LINKER)) $(LDFLAGS)
 
@@ -821,12 +817,6 @@ override proj_output_filename = $(foreach x,$1,$(BIN_DIR)/$(os_mode_string)/$(PR
 override proj_recursive_lib_deps = $(sort $(call proj_recursive_lib_deps_low,$1))
 override proj_recursive_lib_deps_low = $(if $1,$(foreach x,$1,$(__projsetting_libs_$x)) $(call proj_recursive_lib_deps_low,$(foreach x,$1,$(__projsetting_deps_$x))))
 
-# Given a project name $1, generates an assignment to an environment variable, configuring the library search path.
-# The variable will point to the output directory, plus all libraries used by this project or its dependencies, recursively.
-# We also preserve the original contents of the variable. This is especially important when targeting Windows, since PATH might have system DLLs and/or tools.
-override proj_library_path_prefix = $(LIBRARY_PATH_VAR)=$(call quote,$(call proj_library_path_value,$1))
-override proj_library_path_value = $(subst :,$(LIBRARY_PATH_VAR_SEP),$(BIN_DIR)/$(os_mode_string)/$(subst $(space):,:,$(foreach x,$(call proj_recursive_lib_deps,$1),:$(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)))$(if $($(LIBRARY_PATH_VAR)),:$($(LIBRARY_PATH_VAR))))
-
 # A template for PCH targets.
 # Input variables are:
 # * __proj - the project name.
@@ -905,7 +895,7 @@ run-$(__proj): override __proj := $(__proj)
 run-$(__proj): override __filename := $(__filename)
 run-$(__proj): build-$(__proj)
 	$(call log_now,[Running] $(__proj))
-	@$(run_without_buffering)$(call proj_library_path_prefix,$(__proj)) $(RUN_WITH) $(__filename)
+	@$(run_without_buffering)$(RUN_WITH) $(__filename)
 
 # A target to run the project without compiling it.
 .PHONY: run-old-$(__proj)
@@ -913,7 +903,7 @@ run-old-$(__proj): override __proj := $(__proj)
 run-old-$(__proj): override __filename := $(__filename)
 run-old-$(__proj):
 	$(call log_now,[Running old version] $(__proj))
-	@$(run_without_buffering)$(call proj_library_path_prefix,$(__proj)) $(RUN_WITH) $(__filename)
+	@$(run_without_buffering)$(RUN_WITH) $(__filename)
 
 # If this is the first exe project, consider it to be the default.
 ifeq ($(default_exe_proj),)
@@ -1013,8 +1003,6 @@ override mode_config_prefix := MODE :=
 # Those files are regenerated on mode change. E.g. `foo.json` is generated from `foo.default.json`.
 # In them, following replacements are made:
 # * `<MAIN_EXECUTABLE>` -> the output executable of the default project
-# * `<LIBRARY_PATH>` -> the library search path for the main project
-# * `<LIBRARY_PATH_VAR>` -> the env variable name that `<LIBRARY_PATH>` should be assigned to - either `PATH` or `LD_LIBRARY_PATH`.
 GENERATE_ON_MODE_CHANGE := $(proj_dir)/.vscode/launch.json
 # Remove files with missing original files.
 override GENERATE_ON_MODE_CHANGE := $(foreach x,$(GENERATE_ON_MODE_CHANGE),$(if $(wildcard $(call generation_source_for_file,$x)),$x))
@@ -1035,22 +1023,24 @@ remember-mode:
 	$(foreach x,$(GENERATE_ON_MODE_CHANGE),\
 		$(call safe_shell_exec,cp $(call quote,$(call generation_source_for_file,$x)) $(call quote,$x))\
 		$(call safe_shell_exec,sed -i 's|<MAIN_EXECUTABLE>|$(call proj_output_filename,$(default_exe_proj))|' $(call quote,$x))\
-		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH>|$(call proj_library_path_value,$(default_exe_proj))|' $(call quote,$x))\
-		$(call safe_shell_exec,sed -i 's|<LIBRARY_PATH_VAR>|$(LIBRARY_PATH_VAR)|' $(call quote,$x))\
 	)
 	@true
 
 # --- Copy assets target ---
 
-# Uses `rsync` to copy assets to the directory $1.
-# It deletes all mismatching files in the target directory, except for the project outputs, if any.
+# Uses `rsync` to copy assets and library dependencies to the directory $1. If $2 is true, also copy our library dependencies.
+# We don't run LDD, and instead copy all requested dependencies. We also patchelf them, if needed.
+# We delete all mismatching files in the target directory, except for the project outputs, if any.
 # Note that we prefix project outputs with `/`, to indicate that rsync shouldn't match those filenames in subdirectories.
-override copy_assets_to = $(if $(strip $(ASSETS)),$(call safe_shell_exec,rsync -r --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(ASSETS) $(call quote,$1)))
+override copy_assets_and_libs_to = \
+	$(call var,__lib_deps := $(strip $(foreach x,$(foreach x,$(sort $(foreach x,$(proj_list),$(__projsetting_libs_$x))),$(wildcard $(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)/*)),$(if $(call IS_SHARED_LIB_FILENAME,$x),$x))))\
+	$(call safe_shell_exec,rsync -Lr --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(foreach x,$(__lib_deps),--exclude $(call quote,/$(notdir $x))) $(ASSETS) $(call quote,$1))\
+	$(if $2,$(foreach x,$(__lib_deps),$(if $(strip $(call safe_shell,cp -uv $(call quote,$x) $(call quote,$1))),$(info [Copy library] $(notdir $x))$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$1/$(notdir $x)))))))
 
 # Copies `ASSETS` to the current bin directory, ignoring any files matching `ASSETS_IGNORED_PATTERNS`.
 .PHONY: sync-assets
 sync-assets:
-	$(call copy_assets_to,$(BIN_DIR)/$(os_mode_string))
+	$(call copy_assets_and_libs_to,$(BIN_DIR)/$(os_mode_string),1)
 	@true
 
 
@@ -1060,7 +1050,7 @@ sync-assets:
 
 # Here we use shell redirection to force-overwrite the file instead of updating it. AND it makes it easier to determine the target path.
 override dist_command-zip = (cd $(call quote,$1) && zip -qr9 - $(call quote,$2)) >$(call quote,$3).zip
-override dist_command-tar-zst = ZSTD_CLEVEL=19 tar --zstd -C $(call quote,$1) -cf $(call quote,$3).tar.zst $(call quote,$2)
+override dist_command-tar-zst = ZSTD_CLEVEL=13 tar --zstd -C $(call quote,$1) -cf $(call quote,$3).tar.zst $(call quote,$2)
 
 .PHONY: dist
 dist: $(call proj_output_filename,$(default_exe_proj))
@@ -1076,16 +1066,11 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call var,__libs := $(subst $(abspath $(proj_dir)),$(proj_dir),$(__libs)))
 	$(info [Dist] Preprocessed LDD output: $(__libs))
 	$(info [Dist] --- Following libraries will be copied:)
-	$(call, ### Filter our own library projects.)
+	$(call, ### Filter our own library projects and library dependencies.)
 	$(call var,__libs_proj := $(strip $(foreach x,$(__libs),$(if $(filter $(BIN_DIR)/$(os_mode_string)/%,$x),$x))))
 	$(call var,__libs := $(filter-out $(__libs_proj),$(__libs)))
-	$(if $(__libs_proj),$(info [Dist] Library projects: $(notdir $(__libs_proj))))
+	$(if $(__libs_proj),$(info [Dist] Our libraries: $(notdir $(__libs_proj))))
 	$(call var,__libs_copied += $(__libs_proj))
-	$(call, ### Filter our own library dependencies.)
-	$(call var,__libs_dep := $(strip $(foreach x,$(__libs),$(if $(filter $(LIB_DIR)/%,$x),$x))))
-	$(call var,__libs := $(filter-out $(__libs_dep),$(__libs)))
-	$(if $(__libs_dep),$(info [Dist] Library dependencies: $(notdir $(__libs_dep))))
-	$(call var,__libs_copied += $(__libs_dep))
 	$(call, ### Filter good system libraries.)
 	$(call var,__libs_sys := $(strip $(foreach x,$(__libs),$(if $(call filter_substr,$(DIST_COPIED_LIB_PATTERNS),$x),$x))))
 	$(call var,__libs := $(filter-out $(__libs_sys),$(__libs)))
@@ -1113,7 +1098,7 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call var,__target_dir := $(DIST_TMP_DIR)/$(__target_name))
 	$(call safe_shell_exec,mkdir -p $(call quote,$(__target_dir)))
 	$(call, ### Copy assets. This must be first, because the command will erase some other files from target directory.)
-	$(call copy_assets_to,$(__target_dir))
+	$(call copy_assets_and_libs_to,$(__target_dir))
 	$(call, ### Copy the executable.)
 	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(__target_dir)))\
 	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $<))))\
