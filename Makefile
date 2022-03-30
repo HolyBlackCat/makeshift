@@ -157,9 +157,8 @@ override archive_extract-ZIP = $(call safe_shell_exec,unzip $(call quote,$1) -d 
 # Order matters, the first match is used.
 # A space separated list of `<filename>-><buildsystem>`.
 # We give preference to CMake, because it's easier to deal with.
-# But note that:
-# * Some libraries don't build shared libraries by default with CMake, at least: freetype, ogg, vorbis.
-# * CMake support in zlib is jank. On MinGW it produces `libzlib.dll`, while pkg-config says to link `-lz`.
+# Downsides:
+# * zlib - CMake support is jank. On MinGW it produces `libzlib.dll`, while pkg-config says to link `-lz`.
 buildsystem_detection := CMakeLists.txt->cmake configure->configure_make
 
 
@@ -1199,6 +1198,8 @@ override buildsystem-cmake = \
 		-DCMAKE_EXE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_MODULE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_SHARED_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
+		$(call, Weird semi-documented flags. Helps at least for freetype, ogg, vorbis.)\
+		-DBUILD_SHARED_LIBS=ON\
 		$(call, Specifying an invalid build type disables built-in flags.)\
 		-DCMAKE_BUILD_TYPE=Custom\
 		-DCMAKE_INSTALL_PREFIX=$(call quote,$(__install_dir))\
