@@ -890,7 +890,7 @@ $(foreach x,$(__projsetting_deps_$(__proj)),$(if $(filter shared,$(__proj_kind_$
 
 # A user-friendly link target. It also updates assets.
 .PHONY: build-$(__proj)
-build-$(__proj): $(__filename) sync-assets
+build-$(__proj): $(__filename) sync-libs-and-assets
 
 # The actual link target.
 $(__filename): override __proj := $(__proj)
@@ -1056,9 +1056,9 @@ override copy_assets_and_libs_to = \
 	$(call safe_shell_exec,rsync -Lr --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(foreach x,$(__lib_deps),--exclude $(call quote,/$(notdir $x))) $(ASSETS) $(call quote,$1))\
 	$(if $2,$(foreach x,$(__lib_deps),$(if $(strip $(call safe_shell,cp -uv $(call quote,$x) $(call quote,$1))),$(info [Copy library] $(notdir $x))$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$1/$(notdir $x)))))))
 
-# Copies `ASSETS` to the current bin directory, ignoring any files matching `ASSETS_IGNORED_PATTERNS`.
-.PHONY: sync-assets
-sync-assets:
+# Copies libraries and `ASSETS` to the current bin directory, ignoring any files matching `ASSETS_IGNORED_PATTERNS`.
+.PHONY: sync-libs-and-assets
+sync-libs-and-assets: $(call lib_name_to_log_path,$(all_libs))
 	$(call copy_assets_and_libs_to,$(BIN_DIR)/$(os_mode_string),1)
 	@true
 
