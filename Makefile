@@ -392,7 +392,7 @@ endif
 # Libraries are built here.
 LIB_DIR := $(proj_dir)/deps
 # Library archives are found here.
-ARCHIVE_DIR := $(proj_dir)/deps_archives
+ARCHIVE_DIR := $(proj_dir)/deps_src
 # Object files are written here.
 OBJ_DIR := $(proj_dir)/obj
 # Binaries are written here.
