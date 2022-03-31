@@ -423,6 +423,11 @@ DIST_NAME = *_$(TARGET_OS)_$(MODE)_^
 # The build number is stored in this file.
 DIST_BUILD_NUMBER_FILE := $(proj_dir)/build_number.txt
 
+# If true, don't increment build number after packaging.
+# Note that it affects the NEXT build, not the current one.
+# When making multiple builds, specify it for all of them except the last one.
+KEEP_BUILD_NUMBER := 0
+
 # The package archive type.
 ifeq ($(TARGET_OS),windows)
 DIST_ARCHIVE_TYPE = zip
@@ -568,6 +573,9 @@ override ALLOW_PCH := $(filter-out 0,$(ALLOW_PCH))
 
 # If `KEEP_BUILD_TREES` was 0, make it empty.
 override KEEP_BUILD_TREES := $(filter-out 0,$(KEEP_BUILD_TREES))
+
+# If `KEEP_BUILD_NUMBER` was 0, make it empty.
+override KEEP_BUILD_NUMBER := $(filter-out 0,$(KEEP_BUILD_NUMBER))
 
 # Filter out undesired languages.
 $(if $(filter-out $(language_list),$(DISABLED_LANGS)),$(error Invalid languages in DISABLED_LANGS: $(filter-out $(language_list),$(DISABLED_LANGS))))
@@ -1141,8 +1149,10 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_TYPE),$(DIST_TMP_DIR),$(__target_name),$(DIST_DIR)/$(__target_name)))
 	$(info $(lf)[Dist] Produced:  $(__target_name)$(lf))
 	$(call, ### Increment and write build number. Makes more sense to do it now, in case something reads it during build.)
-	$(call var,__buildnumber := $(call safe_shell,echo $(call quote,$(__buildnumber)+1) | bc))
-	$(file >$(DIST_BUILD_NUMBER_FILE),$(__buildnumber))
+	$(if $(KEEP_BUILD_NUMBER),,\
+		$(call var,__buildnumber := $(call safe_shell,echo $(call quote,$(__buildnumber)+1) | bc))\
+		$(file >$(DIST_BUILD_NUMBER_FILE),$(__buildnumber))\
+	)
 	@true
 
 
