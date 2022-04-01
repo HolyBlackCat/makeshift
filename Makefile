@@ -482,7 +482,7 @@ endif
 # This is prepended to the program name in the `run-*` targets. E.g. you can put `gdb` here.
 RUN_WITH :=
 
-# Extra files cleaned by the `clean-for-storage` target. Relative to `$(proj_dir)`.
+# Extra files cleaned by the `prepare-for-storage` target. Relative to `$(proj_dir)`.
 CLEAN_FILES_FOR_STORAGE := .cache
 
 
@@ -1188,11 +1188,12 @@ dist: build-default
 # --- 'Clean for storage' target ---
 
 # Cleans the project for long-term storage.
-.PHONY: clean-for-storage
-clean-for-storage:
+.PHONY: prepare-for-storage
+prepare-for-storage: dist-deps
 	$(call safe_shell_exec,rm -rf $(call quote,$(BIN_DIR)))
 	$(call safe_shell_exec,rm -rf $(call quote,$(OBJ_DIR)))
 	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_DIR)))
+	$(call safe_shell_exec,rm -rf $(call quote,$(LIB_SRC_DIR)))
 	$(call safe_shell_exec,rm -rf $(call quote,$(DIST_TMP_DIR)))
 	$(call safe_shell_exec,rm -rf $(call quote,$(COMMANDS_FILE)))
 	$(foreach x,$(CLEAN_FILES_FOR_STORAGE),$(call safe_shell_exec,rm -rf $(call quote,$(proj_dir)/$x)))
@@ -1204,16 +1205,16 @@ clean-for-storage:
 $(LIB_SRC_DIR):
 	$(call var,__target_file := $(DIST_DEPS_DIR)/$(notdir $(DIST_DEPS_ARCHIVE)))
 	$(call var,__download :=)
-	$(info Populating `$@` with dependency sources.)
+	$(info [Deps] Populating `$@` with dependency sources.)
 	$(if $(findstring ://,$(DIST_DEPS_ARCHIVE)),\
-		$(info Using archive at: $(DIST_DEPS_ARCHIVE))\
+		$(info [Deps] Using archive at: $(DIST_DEPS_ARCHIVE))\
 		$(if $(wildcard $(__target_file)),\
-			$(info The file already exists at `$(__target_file)`, will use it.)\
+			$(info [Deps] The file already exists at `$(__target_file)`, will use it.)\
 		,\
 			$(call var,__download := yes)\
 		)\
 	,\
-		$(info Using archive at: $(__target_file))\
+		$(info [Deps] Using archive at: $(__target_file))\
 	)
 	$(if $(__download),@$(run_without_buffering)wget -q --show-progress $(call quote,$(DIST_DEPS_ARCHIVE)) -O $(call quote,$(__target_file)))
 	$(call var,__deps_ar_type := $(call archive_classify_filename,$(__target_file)))
