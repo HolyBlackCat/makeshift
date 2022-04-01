@@ -214,15 +214,17 @@ override lib_ar_list :=
 # A list is not recommended, because LibrarySetting always applies only to the last library.
 override Library = $(call var,lib_ar_list += $1)
 
-override lib_setting_names := deps build_system cmake_flags configure_vars copy_files
+override lib_setting_names := deps build_system cmake_flags configure_vars configure_flags copy_files bad_pkgconfig
 # On success, assigns $2 to variable `__libsetting_$1_<lib>`. Otherwise causes an error.
 # Settings are:
 # * deps - library dependencies, that this library will be allowed to see when building. A space-separated list of library names (their archive names without extensions).
 # * build_system - override build system detection. Can be: `cmake`, `configure_make`, etc. See `id_build_system` below for the full list.
 # * cmake_flags - if CMake is used, those are passed to it. Probably should be a list of `-D<var>=<value>`.
 # * configure_vars - if configure+make is used, this is prepended to `configure` and `make`. This should be a list of `<var>=<value>`, but you could use `/bin/env` there too.
+# * configure_flags - if configure+make is used, this is passed to `./configure`.
 # * copy_files - if `copy_files` build system is used, this must be specified to describe what files/dirs to copy.
 #                Must be a space-separated list of `src->dst`, where `src` is relative to source and `dst` is relative to the install prefix. Both can be files or directories.
+# * bad_pkgconfig - if not empty (or 0), destroy the pkg-config files for the library. This causes us to fall back to the automatic flag detection.
 override LibrarySetting = \
 	$(if $(filter-out $(lib_setting_names),$1)$(filter-out 1,$(words $1)),$(error Invalid library setting `$1`, expected one of: $(lib_setting_names)))\
 	$(if $(filter 0,$(words $(lib_ar_list))),$(error Must specify library settings after a library))\
@@ -690,8 +692,10 @@ $(__log_path_final): $(__ar_path) $(call lib_name_to_log_path,$(__libsetting_dep
 	$(call, ### Run the build system.)
 	$(buildsystem-$(__build_sys))
 	$(call, ### Fix some crap.)
-	$(call, ### * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this.)
+	$(call, ### * Copy pkgconfig files from share/pkgconfig to lib/pkgconfig. Zlib needs this when using CMake, which isn't the only problem with its CMake support.)
 	$(call safe_shell_exec,cp -rT $(call quote,$(__install_dir)/share/pkgconfig) $(call quote,$(__install_dir)/lib/pkgconfig) 2>/dev/null || true)
+	$(call, ### * Nuke the pkgconfig files, if requested. At least freetype+cmake generates broken files.)
+	$(if $(filter-out 0,$(__libsetting_bad_pkgconfig_$(__lib_name))),$(call safe_shell_exec,find -name '*.pc' -delete))
 	$(call, ### Delete the build tree, if needed.)
 	$(if $(KEEP_BUILD_TREES),,$(call safe_shell_exec,rm -rf $(call quote,$(__build_dir))))
 	$(call, ### On success, move the log to the right location.)
@@ -1281,7 +1285,7 @@ override buildsystem-configure_make = \
 	$(call log_now,[Library] >>> Running `./configure`...)\
 	$(call, ### Note abspath on the prefix, I got an error explicitly requesting an absolute path. Tested on libvorbis.)\
 	$(call, ### Note the jank `cd`. It seems to allow out-of-tree builds.)\
-	$(call safe_shell_exec,(cd $(call quote,$(__build_dir)) && $(__bs_shell_vars) $(call quote,$(abspath $(__source_dir)/configure)) --prefix=$(call quote,$(abspath $(__install_dir)))) >>$(call quote,$(__log_path)))\
+	$(call safe_shell_exec,(cd $(call quote,$(__build_dir)) && $(__bs_shell_vars) $(call quote,$(abspath $(__source_dir)/configure)) --prefix=$(call quote,$(abspath $(__install_dir))) $(__libsetting_configure_flags_$(__lib_name))) >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,$(__bs_shell_vars) make -C $(call quote,$(__build_dir)) -j$(JOBS) -Otarget 2>&1 >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Installing...)\
