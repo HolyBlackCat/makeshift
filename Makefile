@@ -429,18 +429,16 @@ DIST_BUILD_NUMBER_FILE := $(proj_dir)/build_number.txt
 
 # The package archive type.
 ifeq ($(TARGET_OS),windows)
-DIST_ARCHIVE_TYPE := zip
+DIST_ARCHIVE_EXT := .zip
 else
-DIST_ARCHIVE_TYPE := tar-zst
+DIST_ARCHIVE_EXT := .tar.zst
 endif
 
-# The name of deps archive.
-DIST_DEPS_ARCHIVE := $(proj_dir)/deps
-# The type of deps archive.
-DIST_DEPS_ARCHIVE_TYPE := zip
-
-# Will downloads dependency sources from this URL, if specified.
-DIST_DEPS_URL :=
+# Dependency sources are extracted from this archive.
+# If this is a filename, it's relative to `$(DIST_DEPS_DIR)`.
+# If this is an URL, it's downloaded to `$(DIST_DEPS_DIR)` first.
+DIST_DEPS_ARCHIVE := deps.zip
+DIST_DEPS_DIR := $(proj_dir)
 
 # Those files and directories are copied next to the executable.
 # Since we use `rsync`, a trailing slash has special meaning for directories,
@@ -1094,11 +1092,11 @@ sync-libs-and-assets: $(call lib_name_to_log_path,$(all_libs))
 
 # --- Packaging target ---
 
-# Commands to produce the package archive. $1 is the source directory, $2 is a list of files in that directory, $3 is the resulting archive without extension.
+# Commands to produce the package archive. $1 is the source directory, $2 is a list of files in that directory, $3 is the resulting archive.
 
 # Here we use shell redirection to force-overwrite the file instead of updating it. AND it makes it easier to determine the target path.
-override dist_command-zip = (cd $(call quote,$1) && zip -qr9 - $2) >$(call quote,$3).zip
-override dist_command-tar-zst = ZSTD_CLEVEL=13 tar --zstd -C $(call quote,$1) -cf $(call quote,$3).tar.zst $2
+override dist_command-.zip = (cd $(call quote,$1) && zip -qr9 - $2) >$(call quote,$3)
+override dist_command-.tar.zst = ZSTD_CLEVEL=13 tar --zstd -C $(call quote,$1) -cf $(call quote,$3) $2
 
 # Decrement the build number, don't do anything else.
 # Do this between consecutive builds that must have the same build number.
@@ -1111,11 +1109,12 @@ repeat-build-number:
 	$(info Will repeat build number: $(__buildnumber))
 	@true
 
-# Archives library sources into a single archive named `DIST_DEPS_ARCHIVE` in the current dir, of type `DIST_ARCHIVE_TYPE`.
+# Archives library sources into a single archive. The filename without path is taken from `DIST_DEPS_ARCHIVE`. The directory is `DIST_DEPS_DIR`.
 .PHONY: dist-deps
 dist-deps:
-	$(if $(dist_command-$(DIST_DEPS_ARCHIVE_TYPE)),,$(error Unknown archive type: $(DIST_DEPS_ARCHIVE_TYPE)))
-	$(call safe_shell_exec,$(call dist_command-$(DIST_DEPS_ARCHIVE_TYPE),$(LIB_SRC_DIR),$(patsubst $(LIB_SRC_DIR)/%,%,$(wildcard $(LIB_SRC_DIR)/*)),$(DIST_DEPS_ARCHIVE)))
+	$(call var,__ar_ext := $(suffix $(notdir $(DIST_DEPS_ARCHIVE))))
+	$(if $(dist_command-$(__ar_ext)),,$(error Don't know how to create a `$(__ar_ext)` archive))
+	$(call safe_shell_exec,$(call dist_command-$(__ar_ext),$(LIB_SRC_DIR),$(patsubst $(LIB_SRC_DIR)/%,%,$(wildcard $(LIB_SRC_DIR)/*)),$(DIST_DEPS_DIR)/$(notdir $(DIST_DEPS_ARCHIVE))))
 	@true
 
 # Build and package the app, using the current mode. Then increment the build number.
@@ -1177,8 +1176,8 @@ dist: build-default
 		$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $x))))\
 	)
 	$(call, ### Make an archive.)
-	$(if $(dist_command-$(DIST_ARCHIVE_TYPE)),,$(error Unknown archive type: $(DIST_ARCHIVE_TYPE)))
-	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_TYPE),$(DIST_TMP_DIR),$(call quote,$(__target_name)),$(DIST_DIR)/$(__target_name)))
+	$(if $(dist_command-$(DIST_ARCHIVE_EXT)),,$(error Unknown archive type: $(DIST_ARCHIVE_EXT)))
+	$(call safe_shell_exec,$(call dist_command-$(DIST_ARCHIVE_EXT),$(DIST_TMP_DIR),$(call quote,$(__target_name)),$(DIST_DIR)/$(__target_name)$(DIST_ARCHIVE_EXT)))
 	$(info $(lf)[Dist] Produced:  $(__target_name)$(lf))
 	$(call, ### Increment and write build number. Makes more sense to do it now, in case something reads it during build.)
 	$(call var,__buildnumber := $(call safe_shell,echo $(call quote,$(__buildnumber)+1) | bc))
@@ -1203,16 +1202,23 @@ clean-for-storage:
 # --- Auto-download dependency sources ---
 
 $(LIB_SRC_DIR):
-ifeq ($(DIST_DEPS_URL),)
-	$(error Missing dependency sources in `$(LIB_SRC_DIR)`)
-else
-	$(call var,__deps_ar := $(proj_dir)/$(notdir $(DIST_DEPS_URL)))
-	$(call var,__deps_ar_type := $(call archive_classify_filename,$(__deps_ar)))
+	$(call var,__target_file := $(DIST_DEPS_DIR)/$(notdir $(DIST_DEPS_ARCHIVE)))
+	$(call var,__download :=)
+	$(info Populating `$@` with dependency sources.)
+	$(if $(findstring ://,$(DIST_DEPS_ARCHIVE)),\
+		$(info Using archive at: $(DIST_DEPS_ARCHIVE))\
+		$(if $(wildcard $(__target_file)),\
+			$(info The file already exists at `$(__target_file)`, will use it.)\
+		,\
+			$(call var,__download := yes)\
+		)\
+	,\
+		$(info Using archive at: $(__target_file))\
+	)
+	$(if $(__download),@$(run_without_buffering)wget -q --show-progress $(call quote,$(DIST_DEPS_ARCHIVE)) -O $(call quote,$(__target_file)))
+	$(call var,__deps_ar_type := $(call archive_classify_filename,$(__target_file)))
 	$(if $(__deps_ar_type),,$(error Don't know this archive extension))
-	$(call log_now,Will populate the directory `$@` with library sources from: $(DIST_DEPS_URL))
-	@$(run_without_buffering)wget -q --show-progress $(call quote,$(DIST_DEPS_URL)) -O $(call quote,$(__deps_ar))
-	@$(call archive_extract-$(__deps_ar_type),$(__deps_ar),$(LIB_SRC_DIR))
-endif
+	@$(call archive_extract-$(__deps_ar_type),$(__target_file),$(LIB_SRC_DIR))
 
 
 # --- Build system definitions ---
