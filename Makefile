@@ -146,7 +146,8 @@ override archive_extract-TAR = tar -xf $(call quote,$1) -C $(call quote,$2)
 
 archive_types += ZIP
 override archive_is-ZIP = $(filter %.zip,$1)
-override archive_extract-ZIP = unzip -q $(call quote,$1) -d $(call quote,$2)
+# `-o` allows us to overwrite files. Good for at least `make -B deps_src`.
+override archive_extract-ZIP = unzip -oq $(call quote,$1) -d $(call quote,$2)
 
 
 # --- Build system detection config ---
@@ -339,6 +340,7 @@ export CFLAGS :=
 export CXXFLAGS :=
 export CPPFLAGS :=
 export LDFLAGS :=
+export LDSHARED ?= $(CC)
 
 # LDD. We don't care about the Quasi-MSYS2's `win-ldd` wrapper since we can convert paths ourselves. We need it for the native Winwdows anyway.
 # Also an optional program to preprocess the paths from LDD.
@@ -374,7 +376,7 @@ override PKG_CONFIG_LIBDIR :=
 export PKG_CONFIG_LIBDIR
 
 # A list of those variables, and a string suitable to set them in a shell.
-override exported_env_vars_list := CC CXX CPP LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
+override exported_env_vars_list := CC CXX CPP LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
 override env_vars_for_shell = $(foreach x,$(exported_env_vars_list),$x=$(call quote,$($x)))
 
 MODE :=# Build mode.
@@ -846,9 +848,12 @@ override source_files_to_output_list = $(call source_files_to_main_outputs,$1,$2
 # Given a list of projects $1, returns the link results they produce.
 override proj_output_filename = $(foreach x,$1,$(BIN_DIR)/$(os_mode_string)/$(PREFIX_$(__proj_kind_$x))$x$(EXT_$(__proj_kind_$x)))
 
-# Given a list of projects $1, recursively finds all their library dependencies.
-override proj_recursive_lib_deps = $(sort $(call proj_recursive_lib_deps_low,$1))
-override proj_recursive_lib_deps_low = $(if $1,$(foreach x,$1,$(__projsetting_libs_$x)) $(call proj_recursive_lib_deps_low,$(foreach x,$1,$(__projsetting_deps_$x))))
+# Given a list of projects $1, recursively finds all their library dependencies. Recurses both into projects and libraries.
+override proj_recursive_lib_deps = $(sort $(call proj_recursive_lib_deps_low_lib,$(sort $(foreach x,$(sort $(call proj_recursive_lib_deps_low_proj,$1)),$(__projsetting_libs_$x)))))
+# Helper. For a list of projects, adds all its project dependencies.
+override proj_recursive_lib_deps_low_proj = $(if $1,$1 $(call proj_recursive_lib_deps_low_proj,$(foreach x,$1,$(__projsetting_deps_$x))))
+# Helper. Recurses into libraries.
+override proj_recursive_lib_deps_low_lib = $(if $1,$1 $(call proj_recursive_lib_deps_low_lib,$(foreach x,$1,$(__libsetting_deps_$x))))
 
 # A template for PCH targets.
 # Input variables are:
@@ -1072,7 +1077,7 @@ remember-mode:
 # We delete all mismatching files in the target directory, except for the project outputs, if any.
 # Note that we prefix project outputs with `/`, to indicate that rsync shouldn't match those filenames in subdirectories.
 override copy_assets_and_libs_to = \
-	$(call var,__lib_deps := $(strip $(foreach x,$(foreach x,$(sort $(foreach x,$(proj_list),$(__projsetting_libs_$x))),$(wildcard $(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)/*)),$(if $(call IS_SHARED_LIB_FILENAME,$x),$x))))\
+	$(call var,__lib_deps := $(strip $(foreach x,$(foreach x,$(call proj_recursive_lib_deps,$(proj_list)),$(wildcard $(LIB_DIR)/$x/$(os_mode_string)/prefix/$(SHARED_LIB_DIR_IN_PREFIX)/*)),$(if $(call IS_SHARED_LIB_FILENAME,$x),$x))))\
 	$(call safe_shell_exec,rsync -Lr --delete $(foreach x,$(ASSETS_IGNORED_PATTERNS),--exclude $x) $(foreach x,$(proj_list),--exclude $(call quote,/$(notdir $(call proj_output_filename,$x)))) $(foreach x,$(__lib_deps),--exclude $(call quote,/$(notdir $x))) $(ASSETS) $(call quote,$1))\
 	$(if $2,$(foreach x,$(__lib_deps),$(if $(strip $(call safe_shell,cp -duv $(call quote,$x) $(call quote,$1))),$(info [Copy library] $(notdir $x))$(if $(PATCHELF),$(if $(filter 0,$(call shell_status,test ! -L $(call quote,$1/$(notdir $x)))),$(call safe_shell_exec,$(PATCHELF) $(call quote,$1/$(notdir $x))))))))
 
@@ -1220,17 +1225,17 @@ endif
 
 override buildsystem-copy_files = \
 	$(call log_now,[Library] >>> Copying files...)\
-	$(call, Make sure we know what files to copy.)\
+	$(call, ### Make sure we know what files to copy.)\
 	$(if $(__libsetting_copy_files_$(__lib_name)),,$(error Must specify the `copy_files` setting for the `copy_files` build system))\
-	$(call, Actually copy the files.)\
+	$(call, ### Actually copy the files.)\
 	$(foreach x,$(__libsetting_copy_files_$(__lib_name)),$(call safe_shell_exec,cp -rT $(call quote,$(__source_dir)/$(word 1,$(subst ->, ,$x))) $(call quote,$(__install_dir)/$(word 2,$(subst ->, ,$x)))))\
-	$(call, Destroy the original extracted directory to save space.)\
+	$(call, ### Destroy the original extracted directory to save space.)\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)))\
 	$(file >$(__log_path),)
 
 override buildsystem-cmake = \
 	$(call log_now,[Library] >>> Configuring CMake...)\
-	$(call, Add dependency include directories to compiler flags. Otherwise OpenAL can't find SDL2.)\
+	$(call, ### Add dependency include directories to compiler flags. Otherwise OpenAL can't find SDL2.)\
 	$(call var,__include_paths := $(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),-I$(call quote,$(abspath $x)/include)))\
 	$(call safe_shell_exec,cmake\
 		-S $(call quote,$(__source_dir))\
@@ -1243,18 +1248,18 @@ override buildsystem-cmake = \
 		-DCMAKE_EXE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_MODULE_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
 		-DCMAKE_SHARED_LINKER_FLAGS=$(call quote,$(LDFLAGS))\
-		$(call, Weird semi-documented flags. Helps at least for freetype, ogg, vorbis.)\
+		$(call, ### Weird semi-documented flags. Helps at least for freetype, ogg, vorbis.)\
 		-DBUILD_SHARED_LIBS=ON\
-		$(call, Specifying an invalid build type disables built-in flags.)\
+		$(call, ### Specifying an invalid build type disables built-in flags.)\
 		-DCMAKE_BUILD_TYPE=Custom\
 		-DCMAKE_INSTALL_PREFIX=$(call quote,$(__install_dir))\
-		$(call, I'm not sure why abspath is needed here, but stuff doesn't work otherwise. Tested on libvorbis depending on libogg.)\
-		$(call, Note the fancy logic that attempts to support spaces in paths.)\
+		$(call, ### I'm not sure why abspath is needed here, but stuff doesn't work otherwise. Tested on libvorbis depending on libogg.)\
+		$(call, ### Note the fancy logic that attempts to support spaces in paths.)\
 		-DCMAKE_PREFIX_PATH=$(call quote,$(abspath $(__install_dir))$(subst $(space);,;,$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),;$(abspath $x))))\
-		$(call, Prevent CMake from finding system packages. Tested on freetype2, which finds system zlib otherwise.)\
+		$(call, ### Prevent CMake from finding system packages. Tested on freetype2, which finds system zlib otherwise.)\
 		-DCMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF\
-		$(call, This is only useful when cross-compiling, to undo the effects of CMAKE_FIND_ROOT_PATH in a toolchain file, which otherwise restricts library search to that path.)\
-		$(call, This also resets the install path, so we need to specify it again with installing.)\
+		$(call, ### This is only useful when cross-compiling, to undo the effects of CMAKE_FIND_ROOT_PATH in a toolchain file, which otherwise restricts library search to that path.)\
+		$(call, ### This also resets the install path, so we need to specify it again with installing.)\
 		-DCMAKE_STAGING_PREFIX=/\
 		$(if $(CMAKE_GENERATOR),$(call quote,-G$(CMAKE_GENERATOR)))\
 		$(__libsetting_cmake_flags_$(__lib_name))\
@@ -1263,27 +1268,29 @@ override buildsystem-cmake = \
 	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,cmake --build $(call quote,$(__build_dir)) 2>&1 >>$(call quote,$(__log_path)) -j$(JOBS))\
 	$(call log_now,[Library] >>> Installing...)\
-	$(call, Note that we must specify the install path again, see the use of CMAKE_STAGING_PREFIX above.)\
+	$(call, ### Note that we must specify the install path again, see the use of CMAKE_STAGING_PREFIX above.)\
 	$(call safe_shell_exec,cmake --install $(call quote,$(__build_dir)) --prefix $(call quote,$(__install_dir)) >>$(call quote,$(__log_path)))\
 
 override buildsystem-configure_make = \
-	$(call var,__bs_shell_vars := $(env_vars_for_shell) $(__libsetting_configure_vars_$(__lib_name)))\
-	$(call, Since we can't configure multiple search prefixes, like we do with CMAKE_SYSTEM_PREFIX_PATH,)\
-	$(call, we copy the prefixes of our dependencies to our own prefix.)\
+	$(call, ### A list of env variables we use. Note explicit pkg-config stuff. At least freetype needs it, and fails to find pkgconfig files in the prefix otherwise.)\
+	$(call, ### Note that we only need to set prefix for this single library, since we copy all dependencies here anyway.)\
+	$(call var,__bs_shell_vars := $(env_vars_for_shell) PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=$(call quote,$(abspath $(__install_dir)/lib/pkgconfig)) $(__libsetting_configure_vars_$(__lib_name)))\
+	$(call, ### Since we can't configure multiple search prefixes, like we do with CMAKE_SYSTEM_PREFIX_PATH,)\
+	$(call, ### we copy the prefixes of our dependencies to our own prefix.)\
 	$(foreach x,$(call lib_name_to_prefix,$(__libsetting_deps_$(__lib_name))),$(call safe_shell_exec,cp -rT $(call quote,$x) $(call quote,$(__install_dir))))\
 	$(call log_now,[Library] >>> Running `./configure`...)\
-	$(call, Note abspath on the prefix, I got an error explicitly requesting an absolute path. Tested on libvorbis.)\
-	$(call, Note the jank `cd`. It seems to allow out-of-tree builds.)\
+	$(call, ### Note abspath on the prefix, I got an error explicitly requesting an absolute path. Tested on libvorbis.)\
+	$(call, ### Note the jank `cd`. It seems to allow out-of-tree builds.)\
 	$(call safe_shell_exec,(cd $(call quote,$(__build_dir)) && $(__bs_shell_vars) $(call quote,$(abspath $(__source_dir)/configure)) --prefix=$(call quote,$(abspath $(__install_dir)))) >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Building...)\
 	$(call safe_shell_exec,$(__bs_shell_vars) make -C $(call quote,$(__build_dir)) -j$(JOBS) -Otarget 2>&1 >>$(call quote,$(__log_path)))\
 	$(call log_now,[Library] >>> Installing...)\
-	$(call, Note DESTDIR. We don't want to install to prefix yet, since we've copied our dependencies there.)\
-	$(call, Note abspath for DESTDIR. You get an error otherwise, explicitly asking for an absolute one. Tested on libvorbis.)\
-	$(call, Note redirecting stderr. Libtool warns when DESTDIR is non-empty, which is useless: "remember to run libtool --finish")\
+	$(call, ### Note DESTDIR. We don't want to install to prefix yet, since we've copied our dependencies there.)\
+	$(call, ### Note abspath for DESTDIR. You get an error otherwise, explicitly asking for an absolute one. Tested on libvorbis.)\
+	$(call, ### Note redirecting stderr. Libtool warns when DESTDIR is non-empty, which is useless: "remember to run libtool --finish")\
 	$(call safe_shell_exec,$(__bs_shell_vars) DESTDIR=$(call quote,$(abspath $(__source_dir)/__tmp_prefix)) make -C $(call quote,$(__build_dir)) install 2>&1 >>$(call quote,$(__log_path)))\
-	$(call, Now we can clean the prefix. Can't do it before installing, because erasing headers from there would trigger a rebuild.)\
+	$(call, ### Now we can clean the prefix. Can't do it before installing, because erasing headers from there would trigger a rebuild.)\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__install_dir)))\
-	$(call, Move from the temporary prefix to the proper one. Note the janky abspath, which is needed because of how DESTDIR works.)\
+	$(call, ### Move from the temporary prefix to the proper one. Note the janky abspath, which is needed because of how DESTDIR works.)\
 	$(call safe_shell_exec,mv $(call quote,$(__source_dir)/__tmp_prefix/$(abspath $(__install_dir))) $(call quote,$(__install_dir)))\
 	$(call safe_shell_exec,rm -rf $(call quote,$(__source_dir)/__tmp_prefix))\
