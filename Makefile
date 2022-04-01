@@ -1120,10 +1120,12 @@ dist-deps:
 
 # Build and package the app, using the current mode. Then increment the build number.
 .PHONY: dist
-dist: $(call proj_output_filename,$(default_exe_proj))
+dist: build-default
+	$(call var,__main_exe := $(call proj_output_filename,$(default_exe_proj)))
 	$(call var,__libs_copied :=)
 	$(call, ### Run LDD.)
-	$(call var,__libs := $(call safe_shell,$(call proj_library_path_prefix,$(default_exe_proj)) $(LDD) $(call quote,$<) | sed -E 's/^\s*([^ =]*)( => ([^ ]*))? .0x.*$$/###\1=>\3/g' | grep -Po '(?<=^###).*$$'))
+	$(call, ### Note abspath on the executable. Without it, the returned paths can contain `.`, which messes with our library classification.)
+	$(call var,__libs := $(call safe_shell,$(call proj_library_path_prefix,$(default_exe_proj)) $(LDD) $(call quote,$(abspath $(__main_exe))) | sed -E 's/^\s*([^ =]*)( => ([^ ]*))? .0x.*$$/###\1=>\3/g' | grep -Po '(?<=^###).*$$'))
 	$(info [Dist] Parsed LDD output: $(__libs))
 	$(call, ### Remove library names from output, leave only paths.)
 	$(call var,__libs := $(foreach x,$(__libs),$(word 2,$(subst =>, ,$x))))
@@ -1167,8 +1169,8 @@ dist: $(call proj_output_filename,$(default_exe_proj))
 	$(call, ### Copy assets. This must be first, because the command will erase some other files from target directory.)
 	$(call copy_assets_and_libs_to,$(__target_dir))
 	$(call, ### Copy the executable.)
-	$(call safe_shell_exec,cp $(call quote,$<) $(call quote,$(__target_dir)))\
-	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $<))))\
+	$(call safe_shell_exec,cp $(call quote,$(__main_exe)) $(call quote,$(__target_dir)))\
+	$(if $(PATCHELF),$(call safe_shell_exec,$(PATCHELF) $(call quote,$(__target_dir)/$(notdir $(__main_exe)))))\
 	$(call, ### Copy libraries.)
 	$(foreach x,$(__libs_copied),\
 		$(call safe_shell_exec,cp $(call quote,$x) $(call quote,$(__target_dir)))\
